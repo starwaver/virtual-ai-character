@@ -1,0 +1,6 @@
+model = "qwen3.8-27b"
+model_provider = "spark_qwen"
+model_context_window = 65536
+model_reasoning_effort = "low"
+model_reasoning_summary = "none"
+model_supports_reasoning_summaries = false
