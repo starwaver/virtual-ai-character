@@ -80,6 +80,8 @@ class CheckConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "matched")
+        self.assertIn("WORKFLOW.md", {file["source_path"] for file in report["targets"]["installed"]["files"]})
+        self.assertNotIn("WORKFLOW.md", {file["source_path"] for file in report["targets"]["codex_home"]["files"]})
         self.assertNotIn("gpt-6-astra", result.stdout)
         self.assertNotIn("workflow", result.stdout)
 
@@ -136,6 +138,58 @@ class CheckConfigTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["targets"]["codex_home"]["status"], "mismatch")
         self.assertEqual(report["targets"]["codex_home"]["extra_files"], ["agents/stale-role.toml"])
+
+    def test_extra_codex_home_workflow_is_reported_as_drift(self) -> None:
+        shutil.copy2(self.source / "WORKFLOW.md", self.codex_home / "WORKFLOW.md")
+
+        result = self._run(
+            "compare",
+            "--workspace",
+            str(self.source),
+            "--installed-root",
+            str(self.installed),
+            "--codex-home",
+            str(self.codex_home),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["targets"]["codex_home"]["status"], "mismatch")
+        self.assertEqual(report["targets"]["codex_home"]["extra_files"], ["WORKFLOW.md"])
+
+    def test_generated_report_exposes_target_inventories_to_publication(self) -> None:
+        report_path = self.root / "config-drift.json"
+        result = self._run(
+            "compare",
+            "--workspace",
+            str(self.source),
+            "--installed-root",
+            str(self.installed),
+            "--codex-home",
+            str(self.codex_home),
+            "--report",
+            str(report_path),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        source_paths = [file["path"] for file in report["source_files"]]
+        installed_paths = [file["source_path"] for file in report["targets"]["installed"]["files"]]
+        codex_home_paths = [file["source_path"] for file in report["targets"]["codex_home"]["files"]]
+
+        self.assertEqual(report["hash_algorithm"], "sha256")
+        self.assertEqual(report["required_files"], source_paths)
+        self.assertEqual(report["source"]["files"], report["source_files"])
+        self.assertEqual(installed_paths, source_paths)
+        self.assertEqual(report["targets"]["installed"]["required_files"], source_paths)
+        self.assertEqual(set(codex_home_paths), set(source_paths) - {"WORKFLOW.md"})
+        self.assertEqual(
+            report["targets"]["codex_home"]["required_files"],
+            [path for path in source_paths if path != "WORKFLOW.md"],
+        )
+        self.assertEqual(report["compatibility"], {"codex_version": "0.155.1", "status": "declared"})
+        self.assertEqual(report["execution_observation"], "not_available")
+        self.assertNotIn("loaded", report["execution_observation"])
 
     def test_missing_expected_source_file_is_unavailable(self) -> None:
         (self.source / "config/agents/planner.toml").unlink()

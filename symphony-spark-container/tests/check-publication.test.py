@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,8 @@ class PublicationGateTests(unittest.TestCase):
                     "exit_status": 0,
                     "status": "passed",
                     "observed_at": "2026-09-22T00:00:00Z",
+                    "evidence_revision": "evidence-001",
+                    "source_fingerprint": "a" * 64,
                     "output_ref": f".git/symphony/issue-3/checks/{check_id}.json",
                     "result_summary": f"{check_id} passed.",
                 }
@@ -68,7 +71,16 @@ class PublicationGateTests(unittest.TestCase):
                         "route_reason": "The planner defines the task graph.",
                     },
                     "scope": {"include": ["WORKFLOW.md"], "exclude": []},
-                    "evidence": {"summary": "The plan was accepted.", "attempt": 1},
+                    "evidence": {
+                        "summary": "The plan was accepted.",
+                        "attempt": 1,
+                        "checks": {
+                            "focused-tests": "python3 -B symphony-spark-container/tests/check-config.test.py -v && python3 -B symphony-spark-container/tests/check-publication.test.py -v",
+                        },
+                        "worker_checks": {
+                            "worker-focused-tests": "python3 -B symphony-spark-container/tests/check-publication.test.py -v",
+                        },
+                    },
                 },
                 {
                     "task_id": "IMPLEMENT-001",
@@ -162,8 +174,8 @@ class PublicationGateTests(unittest.TestCase):
                     },
                     "checks": [
                         {
-                            "check_id": "focused-tests",
-                            "command": "python3 -B symphony-spark-container/tests/check-config.test.py -v && python3 -B symphony-spark-container/tests/check-publication.test.py -v",
+                            "check_id": "worker-focused-tests",
+                            "command": "python3 -B symphony-spark-container/tests/check-publication.test.py -v",
                             "status": "passed",
                             "exit_status": 0,
                         }
@@ -252,7 +264,7 @@ class PublicationGateTests(unittest.TestCase):
             },
             "repairs": {"cycles": 0, "max_cycles": 2, "open_task_ids": [], "records": []},
             "drift": self._drift(),
-            "git": {"scope_clean": True, "secret_scan": "diff reviewed"},
+            "git": {"branch": "symphony/issue-3", "scope_clean": True, "secret_scan": "diff reviewed"},
             "published": False,
         }
 
@@ -274,8 +286,12 @@ class PublicationGateTests(unittest.TestCase):
             "required_files": paths,
             "source_files": source_files,
             "targets": {
-                "installed": {"status": "matched", "files": target_files},
-                "codex_home": {"status": "matched", "files": target_files},
+                "installed": {"status": "matched", "files": target_files, "extra_files": []},
+                "codex_home": {
+                    "status": "matched",
+                    "files": [file for file in target_files if file["source_path"] != "WORKFLOW.md"],
+                    "extra_files": [],
+                },
             },
             "hash_algorithm": "sha256",
         }
@@ -300,6 +316,7 @@ class PublicationGateTests(unittest.TestCase):
         repair_task["attempt_started_at"] = "2026-09-22T00:01:00Z"
         repair_task["evidence"]["summary"] = "The repair checks passed."  # type: ignore[index]
         artifact["tasks"].append(repair_task)  # type: ignore[index]
+        artifact["tasks"][2]["dependencies"].append("REPAIR-001-001")  # type: ignore[index]
 
         repair_result = deepcopy(artifact["worker_results"][0])  # type: ignore[index]
         repair_result["task_id"] = "REPAIR-001-001"
@@ -316,6 +333,7 @@ class PublicationGateTests(unittest.TestCase):
         repair_route["observed_at"] = "2026-09-22T00:01:00Z"
         artifact["route_records"].append(repair_route)  # type: ignore[index]
         artifact["checkpoints"][0]["evidence"]["task_ids"].append("REPAIR-001-001")  # type: ignore[index]
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-22T00:01:00Z"  # type: ignore[index]
         artifact["checks"][0]["observed_at"] = "2026-09-22T00:01:00Z"  # type: ignore[index]
         artifact["review"]["observed_at"] = "2026-09-22T00:01:00Z"  # type: ignore[index]
         artifact["repairs"] = {
@@ -342,6 +360,34 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["status"], "accepted")
+
+    def test_checks_must_match_the_reviewed_source_revision(self) -> None:
+        artifact = self._artifact()
+        artifact["checks"][0]["source_fingerprint"] = "c" * 64  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECK_1_FINGERPRINT_MISMATCH", result.stdout)
+
+    def test_required_checks_must_follow_the_active_implementation(self) -> None:
+        artifact = self._artifact()
+        artifact["worker_results"][0]["observed_at"] = "2026-09-22T00:01:00Z"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECK_focused-tests_STALE", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_focused_check_command_must_match_the_accepted_plan(self) -> None:
+        artifact = self._artifact()
+        artifact["tasks"][0]["evidence"]["checks"]["focused-tests"] = "python3 -B custom-focused-tests.py"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECK_1_PLAN_COMMAND_INVALID", result.stdout)
 
     # https://github.com/starwaver/virtual-ai-character/issues/3
     def test_worker_result_is_required_for_each_implementation_task(self) -> None:
@@ -390,7 +436,45 @@ class PublicationGateTests(unittest.TestCase):
         worker_route["invocation_id"] = "worker-002"
         worker_route["observed_at"] = "2026-09-22T00:02:00Z"
         artifact["route_records"].append(worker_route)  # type: ignore[index]
-        artifact["checks"][0]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
+        for check in artifact["checks"]:  # type: ignore[index]
+            check["observed_at"] = "2026-09-22T00:02:00Z"
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
+        artifact["review"]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 0)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_reverted_file_from_a_failed_attempt_does_not_enter_the_final_diff(self) -> None:
+        artifact = self._artifact()
+        task = artifact["tasks"][1]  # type: ignore[index]
+        task["attempt"] = 2
+        task["attempt_started_at"] = "2026-09-22T00:01:00Z"
+        task["scope"]["include"].append("docs/README.md")  # type: ignore[index]
+        task["evidence"]["attempt"] = 2  # type: ignore[index]
+
+        active_result = artifact["worker_results"][0]  # type: ignore[index]
+        prior_result = deepcopy(active_result)
+        prior_result["attempt"] = 1
+        prior_result["status"] = "failed"
+        prior_result["changed_files"] = ["WORKFLOW.md", "docs/README.md"]
+        prior_result["route"]["invocation_id"] = "worker-history-002"  # type: ignore[index]
+        prior_result["observed_at"] = "2026-09-22T00:00:30Z"
+        artifact["worker_results"].append(prior_result)  # type: ignore[index]
+        active_result["attempt"] = 2
+        active_result["route"]["invocation_id"] = "worker-003"  # type: ignore[index]
+        active_result["observed_at"] = "2026-09-22T00:02:00Z"
+        worker_route = next(route for route in artifact["route_records"] if route["role"] == "implementation-worker")  # type: ignore[index]
+        worker_route["invocation_id"] = "worker-history-002"
+        worker_route["observed_at"] = "2026-09-22T00:00:30Z"
+        worker_route = deepcopy(worker_route)
+        worker_route["invocation_id"] = "worker-003"
+        worker_route["observed_at"] = "2026-09-22T00:02:00Z"
+        artifact["route_records"].append(worker_route)  # type: ignore[index]
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
+        for check in artifact["checks"]:  # type: ignore[index]
+            check["observed_at"] = "2026-09-22T00:02:00Z"
         artifact["review"]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
 
         result = self._run(artifact)
@@ -417,10 +501,58 @@ class PublicationGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("TASK_2_SCOPE_INCLUDE_EXCLUDE_OVERLAP", result.stdout)
 
+    def test_worker_result_must_stay_inside_its_own_exact_scope(self) -> None:
+        artifact = self._artifact()
+        implementation = deepcopy(artifact["tasks"][1])  # type: ignore[index]
+        implementation["task_id"] = "IMPLEMENT-002"
+        implementation["scope"] = {"include": ["docs/README.md"], "exclude": []}
+        implementation["evidence"]["changed_files"] = ["WORKFLOW.md"]  # type: ignore[index]
+        artifact["tasks"].append(implementation)  # type: ignore[index]
+
+        worker_result = deepcopy(artifact["worker_results"][0])  # type: ignore[index]
+        worker_result["task_id"] = "IMPLEMENT-002"
+        worker_result["route"]["invocation_id"] = "worker-002"  # type: ignore[index]
+        worker_result["evidence"]["output_ref"] = ".git/symphony/issue-3/workers/IMPLEMENT-002.json"  # type: ignore[index]
+        artifact["worker_results"].append(worker_result)  # type: ignore[index]
+
+        worker_route = deepcopy(
+            next(route for route in artifact["route_records"] if route["role"] == "implementation-worker")  # type: ignore[index]
+        )
+        worker_route["task_id"] = "IMPLEMENT-002"
+        worker_route["invocation_id"] = "worker-002"
+        artifact["route_records"].append(worker_route)  # type: ignore[index]
+        artifact["checkpoints"][0]["evidence"]["task_ids"].append("IMPLEMENT-002")  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("WORKER_RESULT_2_FILE_OUTSIDE_SCOPE", result.stdout)
+
+    def test_final_changed_files_must_match_active_worker_results(self) -> None:
+        artifact = self._artifact()
+        artifact["changed_files"].append("docs/README.md")  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHANGED_FILES_RESULT_MISMATCH", result.stdout)
+
+    def test_repair_task_must_keep_the_predecessor_scope(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["tasks"][-1]["scope"] = {"include": ["docs/README.md"], "exclude": []}  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_1_TASK_SCOPE_MISMATCH", result.stdout)
+
     def test_light_path_does_not_require_progress_route(self) -> None:
         artifact = self._artifact()
         artifact["path"] = "light"
         artifact["checkpoints"] = []
+        artifact["tasks"] = [
+            task for task in artifact["tasks"] if task["task_id"] != "PROGRESS-001"  # type: ignore[index]
+        ]  # type: ignore[index]
         artifact["route_records"] = [
             route
             for route in artifact["route_records"]
@@ -447,6 +579,7 @@ class PublicationGateTests(unittest.TestCase):
         second_task["attempt_started_at"] = "2026-09-22T00:02:00Z"
         second_task["evidence"]["summary"] = "The second repair checks passed."  # type: ignore[index]
         artifact["tasks"].append(second_task)  # type: ignore[index]
+        artifact["tasks"][2]["dependencies"].append("REPAIR-001-002")  # type: ignore[index]
 
         second_result = deepcopy(artifact["worker_results"][-1])  # type: ignore[index]
         second_result["task_id"] = "REPAIR-001-002"
@@ -472,6 +605,7 @@ class PublicationGateTests(unittest.TestCase):
             "resolution": "The second repair evidence was recorded.",
         })
         artifact["checkpoints"][0]["evidence"]["task_ids"].append("REPAIR-001-002")  # type: ignore[index]
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
         artifact["checks"][0]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
         artifact["review"]["observed_at"] = "2026-09-22T00:02:00Z"  # type: ignore[index]
 
@@ -488,6 +622,15 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("REVIEW_INVOCATION_NOT_INDEPENDENT", result.stdout)
+
+    def test_review_must_follow_active_worker_results(self) -> None:
+        artifact = self._artifact()
+        artifact["worker_results"][0]["observed_at"] = "2026-09-22T00:01:00Z"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REVIEW_BEFORE_WORKERS", result.stdout)
 
     # https://github.com/moeru-ai/airi/issues/3
     def test_independent_implementation_scope_overlap_is_rejected(self) -> None:
@@ -523,6 +666,38 @@ class PublicationGateTests(unittest.TestCase):
         worker_result["route"]["role"] = "implementation-worker-qwen"  # type: ignore[index]
         worker_result["route"]["model"] = "qwen3.8-27b"  # type: ignore[index]
         worker_result["route"]["reasoning"] = "low"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_coordinator_fallback_route_is_explicit_when_worker_capacity_is_unavailable(self) -> None:
+        artifact = self._artifact()
+        implementation = next(task for task in artifact["tasks"] if task["task_id"] == "IMPLEMENT-001")  # type: ignore[index]
+        implementation["owner"]["role"] = "primary-coordinator"  # type: ignore[index]
+        implementation["owner"]["execution_mode"] = "coordinator-fallback"  # type: ignore[index]
+        worker_route = next(route for route in artifact["route_records"] if route["role"] == "implementation-worker")  # type: ignore[index]
+        worker_route["role"] = "primary-coordinator"
+        worker_route["execution_mode"] = "coordinator-fallback"
+        worker_result = artifact["worker_results"][0]  # type: ignore[index]
+        worker_result["route"]["role"] = "primary-coordinator"  # type: ignore[index]
+        worker_result["route"]["execution_mode"] = "coordinator-fallback"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_coordinator_fallback_is_valid_for_a_repair_task(self) -> None:
+        artifact = self._repair_artifact()
+        repair_task = artifact["tasks"][-1]  # type: ignore[index]
+        repair_task["owner"]["role"] = "primary-coordinator"  # type: ignore[index]
+        repair_task["owner"]["execution_mode"] = "coordinator-fallback"  # type: ignore[index]
+        repair_route = artifact["route_records"][-1]  # type: ignore[index]
+        repair_route["role"] = "primary-coordinator"
+        repair_route["execution_mode"] = "coordinator-fallback"
+        repair_result = artifact["worker_results"][-1]  # type: ignore[index]
+        repair_result["route"]["role"] = "primary-coordinator"  # type: ignore[index]
+        repair_result["route"]["execution_mode"] = "coordinator-fallback"  # type: ignore[index]
 
         result = self._run(artifact)
 
@@ -608,6 +783,15 @@ class PublicationGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("CHECK_2_COMMAND_INVALID", result.stdout)
 
+    def test_validation_task_must_depend_on_implementation_tasks(self) -> None:
+        artifact = self._artifact()
+        artifact["tasks"][2]["dependencies"] = ["PLAN-001"]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("TASK_VALIDATE-001_IMPLEMENTATION_DEPENDENCY_MISSING", result.stdout)
+
     # https://github.com/moeru-ai/airi/issues/3
     def test_full_checkpoint_requires_the_progress_route_identity(self) -> None:
         artifact = self._artifact()
@@ -617,6 +801,50 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("CHECKPOINT_1_REVIEWER_INVALID", result.stdout)
+
+    def test_checkpoint_requires_an_explicit_utc_timestamp(self) -> None:
+        artifact = self._artifact()
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-22"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_1_TIMESTAMP_INVALID", result.stdout)
+
+    def test_checkpoint_timestamp_is_required(self) -> None:
+        artifact = self._artifact()
+        artifact["checkpoints"][0]["observed_at"] = "not-a-timestamp"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_1_TIMESTAMP_INVALID", result.stdout)
+
+    def test_checkpoint_findings_must_be_resolved_before_continue(self) -> None:
+        artifact = self._artifact()
+        artifact["checkpoints"][0]["evidence"]["findings"] = ["A finding remains open."]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_1_FINDINGS_UNRESOLVED", result.stdout)
+
+    def test_redirect_checkpoint_requires_a_linked_resolution_task(self) -> None:
+        artifact = self._artifact()
+        checkpoint = artifact["checkpoints"][0]  # type: ignore[index]
+        checkpoint["decision"] = "REDIRECT"
+        checkpoint["required_action"] = "Repair the recorded finding."
+        checkpoint["resolution"] = {
+            "status": "resolved",
+            "summary": "The repair completed.",
+            "task_ids": [],
+            "observed_at": "2026-09-22T00:01:00Z",
+        }
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_1_REDIRECT_UNRESOLVED", result.stdout)
 
     # https://github.com/moeru-ai/airi/issues/3
     def test_light_checkpoint_requires_a_progress_route(self) -> None:
@@ -632,6 +860,26 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("CHECKPOINT_PROGRESS_ROUTE_MISSING", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_progress_route_requires_a_correlated_checkpoint(self) -> None:
+        artifact = self._artifact()
+        artifact["checkpoints"] = []
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_PROGRESS_RESULT_PROGRESS-001_MISSING", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_checkpoint_cannot_precede_the_task_attempt(self) -> None:
+        artifact = self._artifact()
+        artifact["checkpoints"][0]["observed_at"] = "2026-09-21T23:59:00Z"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CHECKPOINT_1_BEFORE_TASK", result.stdout)
 
     # https://github.com/moeru-ai/airi/issues/3
     def test_review_must_match_the_current_evidence_fingerprint(self) -> None:
@@ -675,6 +923,38 @@ class PublicationGateTests(unittest.TestCase):
         self.assertIn("REPAIR_1_CHECK_EVIDENCE_STALE", result.stdout)
         self.assertIn("REPAIR_REVIEW_EVIDENCE_STALE", result.stdout)
 
+    def test_repair_checks_must_follow_repair_completion(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["worker_results"][-1]["observed_at"] = "2026-09-22T00:05:00Z"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_1_CHECK_EVIDENCE_STALE", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_repair_must_rerun_a_named_failed_check(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["repairs"]["records"][0]["failure_refs"] = ["pnpm-lint"]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_1_AFFECTED_CHECK_NOT_RERUN", result.stdout)
+
+    def test_repair_acceptance_ids_must_stay_within_the_predecessor(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["tasks"][1]["acceptance_ids"] = ["ACC-001"]  # type: ignore[index]
+        artifact["worker_results"][0]["acceptance_ids"] = ["ACC-001"]  # type: ignore[index]
+        artifact["tasks"][-1]["acceptance_ids"] = ["ACC-001", "ACC-006"]  # type: ignore[index]
+        artifact["worker_results"][-1]["acceptance_ids"] = ["ACC-001", "ACC-006"]  # type: ignore[index]
+        artifact["repairs"]["records"][0]["acceptance_ids"] = ["ACC-001", "ACC-006"]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_1_TASK_ACCEPTANCE_IDS_MISMATCH", result.stdout)
+
     # https://github.com/moeru-ai/airi/issues/3
     def test_repair_record_requires_an_implementation_owner(self) -> None:
         artifact = self._artifact()
@@ -709,6 +989,15 @@ class PublicationGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("REPAIR_1_OWNER_INVALID", result.stdout)
 
+    def test_repair_failure_reference_must_name_a_check_or_finding(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["repairs"]["records"][0]["failure_refs"] = ["missing-failure"]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_1_FAILURE_REF_UNKNOWN", result.stdout)
+
     # https://github.com/moeru-ai/airi/issues/3
     def test_matched_drift_requires_the_same_file_set(self) -> None:
         artifact = self._artifact()
@@ -719,6 +1008,55 @@ class PublicationGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("DRIFT_INSTALLED_FILE_SET_INVALID", result.stdout)
 
+    def test_generated_drift_report_matches_the_publication_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed = root / "installed"
+            codex_home = root / "codex-home"
+            (installed / "config").mkdir(parents=True)
+            (codex_home / "agents").mkdir(parents=True)
+            shutil.copy2(ROOT / "WORKFLOW.md", installed / "WORKFLOW.md")
+            shutil.copytree(ROOT / "symphony-spark-container/config", installed / "config", dirs_exist_ok=True)
+            shutil.copy2(ROOT / "symphony-spark-container/config/config.toml", codex_home / "config.toml")
+            shutil.copytree(ROOT / "symphony-spark-container/config/agents", codex_home / "agents", dirs_exist_ok=True)
+            shutil.copy2(ROOT / "symphony-spark-container/config/spark-qwen.config.toml", codex_home / "spark-qwen.config.toml")
+
+            report_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(ROOT / "symphony-spark-container/scripts/check-config.py"),
+                    "compare",
+                    "--workspace",
+                    str(ROOT / "symphony-spark-container"),
+                    "--workflow",
+                    str(ROOT / "WORKFLOW.md"),
+                    "--installed-root",
+                    str(installed),
+                    "--codex-home",
+                    str(codex_home),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(report_result.returncode, 0)
+        report = json.loads(report_result.stdout)
+        artifact = self._artifact()
+        artifact["drift"] = {
+            "status": report["status"],
+            "required_files": [file["path"] for file in report["source"]["files"]],
+            "source_files": report["source"]["files"],
+            "targets": report["targets"],
+            "hash_algorithm": "sha256",
+        }
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 0)
+
     def test_matched_drift_requires_equal_hashes(self) -> None:
         artifact = self._artifact()
         artifact["drift"]["targets"]["installed"]["files"][0]["sha256"] = "c" * 64  # type: ignore[index]
@@ -727,6 +1065,49 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("DRIFT_INSTALLED_MATCH_CONTRADICTION", result.stdout)
+
+    def test_matched_drift_rejects_extra_target_files(self) -> None:
+        artifact = self._artifact()
+        artifact["drift"]["targets"]["installed"]["extra_files"] = ["stale.toml"]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("DRIFT_INSTALLED_MATCH_CONTRADICTION", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_drift_missing_file_cannot_retain_a_hash(self) -> None:
+        artifact = self._artifact()
+        artifact["drift"]["targets"]["installed"]["files"][0]["status"] = "missing"  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("DRIFT_INSTALLED_1_STATUS_HASH_CONTRADICTION", result.stdout)
+
+    # https://github.com/starwaver/virtual-ai-character/issues/3
+    def test_repair_cycles_must_be_contiguous(self) -> None:
+        artifact = self._repair_artifact()
+        artifact["repairs"]["cycles"] = 2  # type: ignore[index]
+        artifact["repairs"]["records"][0]["cycle"] = 2  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPAIR_CYCLES_MISMATCH", result.stdout)
+
+    def test_each_mandatory_task_requires_route_evidence(self) -> None:
+        artifact = self._artifact()
+        artifact["route_records"] = [
+            route
+            for route in artifact["route_records"]
+            if route["task_id"] != "VALIDATE-001"
+        ]  # type: ignore[index]
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ROUTE_TASK_VALIDATE-001_MISSING", result.stdout)
 
     def test_invalid_check_shape_returns_a_gate_error(self) -> None:
         artifact = self._artifact()
@@ -758,6 +1139,40 @@ class PublicationGateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("PUBLICATION_EVIDENCE_MISSING", result.stdout)
+
+    def test_published_artifact_requires_correlated_publication_metadata(self) -> None:
+        artifact = self._artifact()
+        artifact["published"] = True
+        artifact["git"]["branch"] = "main"  # type: ignore[index]
+        artifact["publication"] = {
+            "branch": "main",
+            "commit_sha": "not-a-commit",
+            "pr_url": "https://example.com/pull/1",
+            "published_at": "2026-09-22",
+        }
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("PUBLICATION_BRANCH_INVALID", result.stdout)
+        self.assertIn("PUBLICATION_COMMIT_INVALID", result.stdout)
+        self.assertIn("PUBLICATION_PR_URL_INVALID", result.stdout)
+        self.assertIn("PUBLICATION_TIMESTAMP_INVALID", result.stdout)
+
+    def test_publication_timestamp_must_follow_review_evidence(self) -> None:
+        artifact = self._artifact()
+        artifact["published"] = True
+        artifact["publication"] = {
+            "branch": "symphony/issue-3",
+            "commit_sha": "a" * 40,
+            "pr_url": "https://github.com/starwaver/virtual-ai-character/pull/4",
+            "published_at": "2026-09-21T23:59:00Z",
+        }
+
+        result = self._run(artifact)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("PUBLICATION_EVIDENCE_STALE", result.stdout)
 
     def test_missing_acceptance_evidence_is_rejected(self) -> None:
         artifact = self._artifact()

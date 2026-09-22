@@ -25,15 +25,17 @@ Use four durable artifact schemas:
 - `symphony.checkpoint.v1` records progress decisions and required actions.
 - `symphony.publication.v1` records acceptance results, check results, final review, drift, Git scope, and publication status.
 
-Use explicit task statuses and transitions. Store dependencies as task IDs in the task record. Require unique IDs, exact relative paths, disjoint worker ownership, a planner dependency, and an acyclic graph. A worker result must match the task attempt, route invocation, output reference, and changed-file inventory. A failed check cannot become a pass without new evidence. A continuation reuses accepted tasks and does not repeat them.
+Use explicit task statuses and transitions. Store dependencies as task IDs in the task record. Require unique IDs, exact relative paths, disjoint worker ownership, a planner dependency, and an acyclic graph. Every mandatory task needs a route record. A worker result must match the task attempt, route invocation, output reference, and changed-file inventory. A failed check cannot become a pass without new evidence. A continuation reuses accepted tasks and does not repeat them.
 
-Limit each plan to two repair cycles. Each failure maps to an owned repair task with exact paths and rerun commands. The coordinator reruns affected checks and the acceptance reviewer after repair. A second failed repair blocks publication.
+Limit each plan to two repair cycles. Each failure maps to an owned repair task with the exact scope of its direct predecessor and rerun commands. Required checks bind to the current evidence revision and source fingerprint. The coordinator reruns the failed check and every affected required check after repair. The acceptance reviewer runs again after the rerun. A second failed repair blocks publication.
 
 Require these exact acceptance IDs to pass before publication: `ACC-001`, `ACC-002`, `ACC-003`, `ACC-004`, `ACC-005`, and `ACC-006`. Require truthful check results, an `ACCEPT` verdict, no open repair or review finding, in-scope files, and a known route drift result for a live rollout.
 
-Use repository scripts to enforce the last evidence checks. The route checker validates the complete non-secret source inventory, required model files, default routes, Qwen provider and profile, and the exact Luna primary command. The coordinator writes a draft handoff before review. The publication gate validates the final handoff artifact, including correlated worker results, route identity, check commands, strict exit types, review freshness, repair records, publication evidence, and both installed-target drift inventories. It rejects missing or contradictory evidence before pull request publication. It requires matched drift hashes only for an approved live rollout.
+Use repository scripts to enforce the last evidence checks. The route checker validates the complete non-secret source inventory, required model files, default routes, Qwen provider and profile, and the exact Luna primary command. The coordinator writes a draft handoff before review. The publication gate validates the final handoff artifact, including correlated worker results, exact active worker ownership, route identity, dependency order, check commands, strict exit types, checkpoint timestamps and findings, review freshness, repair records, publication evidence, and both installed-target drift inventories. It rejects missing or contradictory evidence before pull request publication. It requires matched drift hashes only for an approved live rollout.
 
-Record SHA-256 hashes for non-secret source and installed route files. Compare the installed mirror and `$CODEX_HOME`. Exclude credentials and runtime state. A drift result of `mismatch` blocks live rollout until the operator updates the installed files.
+Record SHA-256 hashes for non-secret source and installed route files. Compare the eight source files with the installed mirror. Compare the seven configuration files with `$CODEX_HOME`; Codex reads `WORKFLOW.md` from its runtime path. Record extra target files. A target is `matched` only when required hashes match and no extra files exist. Exclude credentials and runtime state. A drift result of `mismatch` blocks live rollout until the operator updates the installed files.
+
+The coordinator calculates the source fingerprint from the reviewed source revision and final changed-file list. The publication gate compares that value with every check and review record. The gate does not authenticate worker identity, model identity, command execution, or GitHub state.
 
 Run these commands from the repository root:
 
@@ -84,7 +86,7 @@ Rejected because the role files and task contract provide the needed policy with
 
 ## Consequences
 
-The coordinator has more records to maintain. The records make continuation, repair ownership, route use, and publication evidence visible. The acceptance reviewer adds one read-only final role. The light path limits that overhead for small tasks.
+The coordinator has more records to maintain. The records make continuation, repair ownership, route use, and publication evidence visible. The acceptance reviewer adds one read-only final role. The light path limits that overhead for small tasks. If worker capacity is unavailable, an explicit coordinator fallback preserves route truth without claiming a worker invocation.
 
 The procedure detects source-to-installed drift but does not update Spark. The desktop coordinator must deploy the reviewed repository files at an idle point. Runtime task and check records remain outside the source commit.
 

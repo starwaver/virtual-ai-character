@@ -43,6 +43,8 @@ The Luna coordinator must start the custom Astra planner before it edits files. 
 
 Each worker edits only the exact paths in its task record. The coordinator owns the plan, task records, integration, checks, Git actions, and publication. The worker returns one `symphony.worker-result.v1` object for each attempt. The gate matches that result to the task attempt, route invocation, output reference, and changed files. A scope error, stale attempt, failed check, or missing evidence does not count as completion.
 
+If an implementation-worker slot is unavailable, the Luna coordinator can complete one bounded task sequentially. Record `primary-coordinator` with `execution_mode = "coordinator-fallback"` in the structured implementation result. Do not report a worker invocation for coordinator work.
+
 The light path uses one planner, one worker, the required checks, and one independent acceptance review. The full path uses up to three workers in disjoint waves and progress checkpoints. Both paths use the same six acceptance IDs, durable artifacts, two-cycle repair limit, and publication gate.
 
 Store `symphony.task.v1`, `symphony.worker-result.v1`, `symphony.checkpoint.v1`, and `symphony.publication.v1` records in issue or runtime state. Do not commit runtime records, logs, reports, or credentials to application source.
@@ -59,7 +61,7 @@ Run the publication gate against the coordinator handoff artifact:
 python3 scripts/check-publication.py --artifact /path/to/publication.json
 ```
 
-The gate rejects missing, failed, or contradictory evidence. Add `--live-rollout` only when the operator has a matched drift report.
+The gate rejects missing, failed, stale, or contradictory evidence. Required check records include the evidence revision and source fingerprint. The coordinator must compute the fingerprint from the reviewed source and changed-file list. The gate does not prove that a worker ran a command or used the declared model route. Add `--live-rollout` only when the operator has a matched drift report.
 
 The gate accepts a light-path handoff without a progress route. It requires a progress route and checkpoint records for a full-path handoff. Both paths require the same acceptance IDs, required checks, independent acceptance review, and repair limit.
 
@@ -77,6 +79,8 @@ pnpm lint
 ```
 
 Record the integer exit status for every command. The publication artifact uses `focused-tests`, `route-check`, `git-diff-check`, `pnpm-typecheck`, and `pnpm-lint`.
+
+Worker checks prove only the worker attempt. The coordinator runs the final required checks after repairs. A repair reruns the failed check and every affected required check.
 
 The source layout keeps `WORKFLOW.md` above this deployment directory. Report that layout with:
 
@@ -99,7 +103,20 @@ docker compose exec --no-TTY orchestrator \
   --codex-home /var/lib/symphony/codex
 ```
 
-The compare result is `matched`, `mismatch`, or `unavailable`. A mismatch or unavailable result blocks a live rollout. The report reads only `WORKFLOW.md`, `config/config.toml`, all five agent TOML files, and `config/spark-qwen.config.toml`. It compares the installed mirror and the `$CODEX_HOME` files. It reads no credential paths.
+The compare result is `matched`, `mismatch`, or `unavailable`. A target is `matched` only when required hashes match and `extra_files` is empty. A mismatch or unavailable result blocks a live rollout. The report reads only `WORKFLOW.md`, `config/config.toml`, all five agent TOML files, and `config/spark-qwen.config.toml`. It compares `WORKFLOW.md` with the installed mirror. It compares the seven configuration files with the installed mirror and the `$CODEX_HOME` files. It reads no credential paths.
+
+### Recover from configuration drift
+
+The entrypoint checks existing targets before it copies new files. A mismatch therefore stops startup.
+
+1. Stop the orchestrator at an approved idle point.
+2. Keep the safe drift report and record its required files and extra files.
+3. Move only the listed configuration targets to an operator backup directory.
+4. Keep `auth.json`, `.env`, keys, logs, and runtime task records in place.
+5. Start the orchestrator with the reviewed source files.
+6. Run `check-config.py compare` again.
+
+If the second report is not `matched`, stop. Do not change the Qwen service or weaken the drift check. Restore the previous configuration from the backup when rollback is required.
 
 ## No live deployment from an issue task
 

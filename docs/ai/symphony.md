@@ -28,7 +28,9 @@ Only issues from authors with GitHub `author_association` equal to `OWNER`, `MEM
 
 ## Ownership and routes
 
-The coordinator owns task assignment, integration, evidence, repository checks, Git actions, and publication. Each worker owns only the exact paths in its task record. A worker reports `scope_error` when it needs another path.
+The coordinator owns task assignment, integration, evidence, repository checks, Git actions, and publication. Each worker owns only the exact paths in its task record. A worker reports `scope_error` when it needs another path. Every mandatory task has a matching route record.
+
+If a worker slot is unavailable, the coordinator can complete one bounded task sequentially. Record `primary-coordinator` with `execution_mode: coordinator-fallback` in the structured implementation result. Do not claim a worker invocation for coordinator work.
 
 | Role | Route | Ownership |
 | --- | --- | --- |
@@ -85,6 +87,8 @@ python3 symphony-spark-container/scripts/check-config.py validate \
   --workspace symphony-spark-container \
   --workflow WORKFLOW.md
 git diff --check
+git diff origin/main --check
+bash -n symphony-spark-container/scripts/symphony-entrypoint.sh
 pnpm typecheck
 pnpm lint
 ```
@@ -100,7 +104,9 @@ python3 symphony-spark-container/scripts/check-publication.py \
 
 The gate returns `0` for accepted evidence, `2` for missing, failed, contradictory, or open evidence, and `3` when it cannot read the artifact. It does not create records or infer worker results.
 
-The gate requires one completed worker result for each implementation or repair task. It matches the result to the task attempt, route invocation, exact changed files, and output reference. It rejects a failed result, an unrun result, a stale result, and an unowned changed file.
+The gate requires one completed worker result for each implementation or repair task. It matches the result to the task attempt, route invocation, exact changed files, and output reference. It rejects a failed result, an unrun result, a stale result, and an unowned changed file. Each required check records the current evidence revision and source fingerprint. The gate rejects a check older than active implementation evidence.
+
+Worker checks prove only the worker attempt. The coordinator runs the final required checks after all repairs. A repair reruns the failed check and every affected required check. A focused check cannot replace a later typecheck or lint result.
 
 ## Configuration drift
 
@@ -112,7 +118,7 @@ python3 symphony-spark-container/scripts/check-config.py source \
   --workflow WORKFLOW.md
 ```
 
-The entrypoint compares the source copies with its installed mirror and `$CODEX_HOME` copies. It records file names, sizes, modes, and SHA-256 values without printing file contents. The compare report can be generated inside the orchestrator with:
+The entrypoint compares the source copies with its installed mirror and `$CODEX_HOME` copies. It records file names, sizes, modes, and SHA-256 values without printing file contents. The installed mirror includes `WORKFLOW.md`. The `$CODEX_HOME` inventory excludes `WORKFLOW.md` because Codex reads the workflow from its runtime path. The compare report can be generated inside the orchestrator with:
 
 ```bash
 docker compose exec --no-TTY orchestrator \
@@ -123,7 +129,9 @@ docker compose exec --no-TTY orchestrator \
   --codex-home /var/lib/symphony/codex
 ```
 
-Compare `WORKFLOW.md`, `config/config.toml`, all five agent TOMLs, and `config/spark-qwen.config.toml`. Compare both the installed mirror and `$CODEX_HOME`. Exclude `.env`, `secrets/`, `auth.json`, keys, tokens, cookies, logs, runtime state, and workspaces. A `mismatch` or `unavailable` result blocks a live rollout.
+Compare `WORKFLOW.md`, `config/config.toml`, all five agent TOMLs, and `config/spark-qwen.config.toml`. A target is `matched` only when its required hashes match and `extra_files` is empty. Compare the workflow with the installed mirror. Compare the seven configuration files with both targets. Exclude `.env`, `secrets/`, `auth.json`, keys, tokens, cookies, logs, runtime state, and workspaces. A `mismatch` or `unavailable` result blocks a live rollout.
+
+The entrypoint checks existing targets before synchronization. If drift stops startup, an operator stops the orchestrator at an idle point, saves the safe report, and moves only the listed configuration targets to a backup directory. The operator keeps login state, credentials, keys, logs, and task records. The operator starts the reviewed image and runs the compare command again. The operator stops if the result is not `matched`. A rollback restores the backed-up configuration and the last accepted source revision.
 
 ## Qwen profile and capacity
 
@@ -159,4 +167,6 @@ The stack does not change or stop the existing Codex containers on Spark.
 
 The coordinator keeps local records in the issue workspace or Symphony runtime state. Use `.git/symphony/<issue-id>/` only when the deployment does not provide a runtime state path. Do not commit these records, logs, credentials, or reports to application source.
 
-The publication gate checks evidence shape and consistency. It cannot prove that a worker ran a command or used a route. The coordinator records observed worker output, command output references, and reviewer decisions separately.
+The publication gate checks evidence shape and consistency. It cannot prove that a worker ran a command or used a route. The coordinator records observed worker output, command output references, and reviewer decisions separately. The gate also matches each active worker result to its exact scope and matches the final changed-file list to active worker evidence.
+
+The coordinator computes the source fingerprint from the reviewed source revision and final changed-file list. It recomputes the fingerprint after a repair or commit-hook change. The gate compares declared values. It does not authenticate model identity, worker invocation, command execution, or GitHub state.

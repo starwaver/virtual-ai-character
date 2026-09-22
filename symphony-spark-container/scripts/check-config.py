@@ -23,6 +23,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "symphony.config.v1"
+HASH_ALGORITHM = "sha256"
 SOURCE_FILES = (
     Path("WORKFLOW.md"),
     Path("config/config.toml"),
@@ -33,6 +34,16 @@ SOURCE_FILES = (
     Path("config/agents/progress-orchestrator.toml"),
     Path("config/spark-qwen.config.toml"),
 )
+TARGET_SOURCE_FILES = {
+    "mirror": SOURCE_FILES,
+    # The workflow is consumed from the deployment mirror. Codex home stores
+    # only the Codex configuration files that the entrypoint installs there.
+    "codex-home": tuple(path for path in SOURCE_FILES if path != Path("WORKFLOW.md")),
+}
+TARGET_EXTRA_PATTERNS = {
+    "mirror": ("config/agents/*.toml", "config/*.config.toml"),
+    "codex-home": ("WORKFLOW.md", "agents/*.toml", "*.config.toml"),
+}
 CODEX_VERSION = "0.155.1"
 REQUIRED_AGENT_ROUTES = {
     "planner.toml": {
@@ -94,7 +105,7 @@ def _source_paths(root: Path) -> list[Path]:
 def _target_extra_paths(root: Path, layout: str) -> list[Path]:
     """Return extra files from the non-secret target allowlist."""
 
-    patterns = ("agents/*.toml", "*.config.toml") if layout == "codex-home" else ("config/agents/*.toml", "config/*.config.toml")
+    patterns = TARGET_EXTRA_PATTERNS[layout]
     paths: list[Path] = []
     for pattern in patterns:
         paths.extend(sorted(path.relative_to(root) for path in root.glob(pattern)))
@@ -183,7 +194,8 @@ def _manifest(root: Path, workflow_path: Path | None = None) -> dict[str, Any]:
 
     selected_workflow = _safe_workflow_path(workflow_path) if workflow_path is not None else None
     files: list[dict[str, Any]] = []
-    for relative in _source_paths(root):
+    source_paths = _source_paths(root)
+    for relative in source_paths:
         if relative == Path("WORKFLOW.md") and selected_workflow is not None:
             files.append(_file_record_at(selected_workflow, relative))
         else:
@@ -192,6 +204,8 @@ def _manifest(root: Path, workflow_path: Path | None = None) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "layout": "source",
         "status": "matched" if all(file["status"] == "present" for file in files) else "unavailable",
+        "hash_algorithm": HASH_ALGORITHM,
+        "required_files": [relative.as_posix() for relative in source_paths],
         "files": files,
     }
 
@@ -199,11 +213,13 @@ def _manifest(root: Path, workflow_path: Path | None = None) -> dict[str, Any]:
 def _target_manifest(source: dict[str, Any], root: Path, layout: str) -> dict[str, Any]:
     """Read the source file identities from an installed target layout."""
 
+    target_source_paths = TARGET_SOURCE_FILES[layout]
+    target_source_path_set = set(target_source_paths)
     target_files: list[dict[str, Any]] = []
     expected_target_paths: set[Path] = set()
     for source_file in source["files"]:
         relative = Path(source_file["path"])
-        if layout == "codex-home" and relative == Path("WORKFLOW.md"):
+        if relative not in target_source_path_set:
             continue
         target_relative = relative
         if layout == "codex-home" and relative.parts[0] == "config":
@@ -238,6 +254,8 @@ def _target_manifest(source: dict[str, Any], root: Path, layout: str) -> dict[st
         "schema_version": SCHEMA_VERSION,
         "layout": layout,
         "status": status,
+        "hash_algorithm": HASH_ALGORITHM,
+        "required_files": [relative.as_posix() for relative in target_source_paths],
         "files": target_files,
         "extra_files": extra_files,
     }
@@ -449,10 +467,16 @@ def _compare_command(args: argparse.Namespace) -> int:
     report = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
+        "hash_algorithm": HASH_ALGORITHM,
+        "required_files": source["required_files"],
+        "source_files": source["files"],
         "source": source,
         "targets": targets,
+        "compatibility": {"codex_version": CODEX_VERSION, "status": "declared"},
         "execution_observation": "not_available",
     }
+    if status == "unavailable":
+        report["required_action"] = "Resolve unavailable configuration state before publication."
     _dump(report, Path(args.report) if args.report else None)
     return exit_code
 

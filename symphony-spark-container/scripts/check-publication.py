@@ -32,6 +32,8 @@ ROUTE_EXPECTATIONS = {
 }
 TASK_ID_PATTERN = re.compile(r"^(?:PLAN|IMPLEMENT|PROGRESS|ACCEPT|VALIDATE)-[0-9]{3}$|^REPAIR-[0-9]+-[0-9]{3}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+PR_URL_PATTERN = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*$")
 DISALLOWED_PATH_CHARS = set("*?[]{}")
 REQUIRED_CHECK_COMMANDS = {
     "git-diff-check": {"git diff --check"},
@@ -41,11 +43,8 @@ REQUIRED_CHECK_COMMANDS = {
         "python3 symphony-spark-container/scripts/check-config.py validate --workspace symphony-spark-container --workflow WORKFLOW.md",
         "python3 -B symphony-spark-container/scripts/check-config.py validate --workspace symphony-spark-container --workflow WORKFLOW.md",
     },
-    "focused-tests": {
-        "python3 -B symphony-spark-container/tests/check-config.test.py -v && python3 -B symphony-spark-container/tests/check-publication.test.py -v",
-    },
 }
-DRIFT_REQUIRED_FILES = {
+DRIFT_SOURCE_REQUIRED_FILES = {
     "WORKFLOW.md",
     "config/config.toml",
     "config/agents/acceptance-reviewer.toml",
@@ -55,7 +54,12 @@ DRIFT_REQUIRED_FILES = {
     "config/agents/progress-orchestrator.toml",
     "config/spark-qwen.config.toml",
 }
+DRIFT_TARGET_REQUIRED_FILES = {
+    "installed": DRIFT_SOURCE_REQUIRED_FILES,
+    "codex_home": DRIFT_SOURCE_REQUIRED_FILES - {"WORKFLOW.md"},
+}
 IMPLEMENTATION_ROLES = {"implementation-worker", "implementation-worker-qwen"}
+IMPLEMENTATION_OWNER_ROLES = IMPLEMENTATION_ROLES | {"primary-coordinator"}
 TASK_STATUSES = {"accepted"}
 WORKER_RESULT_STATUSES = {"completed", "failed", "blocked", "scope_error"}
 
@@ -83,14 +87,16 @@ def _timestamp(value: object) -> datetime | None:
     if not _non_empty_string(value) or not isinstance(value, str):
         return None
     normalized = value.strip()
+    if "T" not in normalized:
+        return None
     if normalized.endswith("Z"):
         normalized = f"{normalized[:-1]}+00:00"
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(None):
+        return None
     return parsed.astimezone(timezone.utc)
 
 
@@ -139,15 +145,73 @@ def _paths_overlap(left: str, right: str) -> bool:
     return longer[: len(shorter)] == shorter
 
 
-def _validate_check(check: object, reasons: list[str], index: int) -> str | None:
+def _scope_owns_path(scope: object, path: str) -> bool:
+    """Return whether a task names this changed file as an owned path."""
+
+    record = _object(scope)
+    if record is None:
+        return False
+    includes = record.get("include")
+    excludes = record.get("exclude")
+    if not isinstance(includes, list) or not isinstance(excludes, list):
+        return False
+    return path in includes and path not in excludes
+
+
+def _plan_check_commands(record: dict[str, Any], field: str) -> dict[str, str]:
+    """Return check commands declared by the accepted plan task."""
+
+    tasks = record.get("tasks")
+    if not isinstance(tasks, list):
+        return {}
+    plan_task = next(
+        (
+            task
+            for task in tasks
+            if isinstance(task, dict) and task.get("task_id") == "PLAN-001"
+        ),
+        None,
+    )
+    evidence = _object(plan_task.get("evidence")) if isinstance(plan_task, dict) else None
+    commands = evidence.get(field) if evidence is not None else None
+    if not isinstance(commands, dict):
+        return {}
+    return {
+        check_id: command
+        for check_id, command in commands.items()
+        if isinstance(check_id, str) and _non_empty_string(command)
+    }
+
+
+def _validate_check(
+    check: object,
+    reasons: list[str],
+    index: int,
+    evidence_revision: object,
+    source_fingerprint: object,
+    plan_check_commands: dict[str, str],
+) -> str | None:
     record = _object(check)
     if record is None:
         _reason(reasons, f"CHECK_{index}_MISSING")
         return None
 
-    for field in ("check_id", "command", "working_directory", "status", "observed_at", "output_ref", "result_summary"):
+    for field in (
+        "check_id",
+        "working_directory",
+        "status",
+        "observed_at",
+        "output_ref",
+        "result_summary",
+        "evidence_revision",
+        "source_fingerprint",
+    ):
         if not _non_empty_string(record.get(field)):
             _reason(reasons, f"CHECK_{index}_{field.upper()}_MISSING")
+    if "command" not in record:
+        _reason(reasons, f"CHECK_{index}_COMMAND_MISSING")
+    elif not _non_empty_string(record.get("command")):
+        _reason(reasons, f"CHECK_{index}_COMMAND_INVALID")
     if "exit_status" not in record:
         _reason(reasons, f"CHECK_{index}_EXIT_STATUS_MISSING")
 
@@ -179,10 +243,17 @@ def _validate_check(check: object, reasons: list[str], index: int) -> str | None
         not isinstance(command, str) or command not in REQUIRED_CHECK_COMMANDS[check_id]
     ):
         _reason(reasons, f"CHECK_{index}_COMMAND_INVALID")
+    if check_id == "focused-tests":
+        if plan_check_commands.get(check_id) != command:
+            _reason(reasons, f"CHECK_{index}_PLAN_COMMAND_INVALID")
     if record.get("working_directory") != ".":
         _reason(reasons, f"CHECK_{index}_WORKING_DIRECTORY_INVALID")
     if _timestamp(record.get("observed_at")) is None:
         _reason(reasons, f"CHECK_{index}_TIMESTAMP_INVALID")
+    if record.get("evidence_revision") != evidence_revision:
+        _reason(reasons, f"CHECK_{index}_EVIDENCE_REVISION_MISMATCH")
+    if record.get("source_fingerprint") != source_fingerprint:
+        _reason(reasons, f"CHECK_{index}_FINGERPRINT_MISMATCH")
     if _non_empty_string(record.get("output_ref")) and not _valid_relative_path(record["output_ref"]):
         _reason(reasons, f"CHECK_{index}_OUTPUT_REF_INVALID")
 
@@ -258,15 +329,26 @@ def _validate_task_records(record: dict[str, Any], reasons: list[str]) -> set[st
             }
             required_roles = next(
                 (roles for prefix, roles in expected_roles.items() if task_id == prefix or task_id.startswith(prefix)),
-                {"implementation-worker", "implementation-worker-qwen"},
+                IMPLEMENTATION_OWNER_ROLES,
             )
             if owner_role not in required_roles:
                 _reason(reasons, f"TASK_{index}_OWNER_ROLE_INVALID")
+            if task_id.startswith(("IMPLEMENT-", "REPAIR-")) and owner_role == "primary-coordinator" and owner.get("execution_mode") != "coordinator-fallback":
+                _reason(reasons, f"TASK_{index}_COORDINATOR_FALLBACK_MISSING")
         _validate_scope(task_record.get("scope"), reasons, index)
 
         evidence = _object(task_record.get("evidence"))
         if evidence is None or not _non_empty_string(evidence.get("summary")) or evidence.get("attempt") != task_record.get("attempt"):
             _reason(reasons, f"TASK_{index}_EVIDENCE_MISSING")
+        if isinstance(task_id, str) and task_id.startswith(("IMPLEMENT-", "REPAIR-")):
+            evidence_files = evidence.get("changed_files") if evidence is not None else None
+            if not isinstance(evidence_files, list) or any(
+                not isinstance(path, str)
+                or not _valid_relative_path(path)
+                or not _scope_owns_path(task_record.get("scope"), path)
+                for path in evidence_files
+            ):
+                _reason(reasons, f"TASK_{index}_EVIDENCE_FILES_INVALID")
         if _timestamp(task_record.get("attempt_started_at")) is None:
             _reason(reasons, f"TASK_{index}_ATTEMPT_START_MISSING")
 
@@ -275,7 +357,7 @@ def _validate_task_records(record: dict[str, Any], reasons: list[str]) -> set[st
         owner = _object(task.get("owner"))
         scope = _object(task.get("scope"))
         includes = scope.get("include") if scope is not None else None
-        if owner is not None and owner.get("role") in {"implementation-worker", "implementation-worker-qwen"} and isinstance(includes, list):
+        if task_id.startswith(("IMPLEMENT-", "REPAIR-")) and owner is not None and owner.get("role") in IMPLEMENTATION_OWNER_ROLES and isinstance(includes, list):
             worker_scopes[task_id] = {path for path in includes if isinstance(path, str)}
 
     def depends_on(task_id: str, dependency_id: str) -> bool:
@@ -335,7 +417,18 @@ def _validate_task_records(record: dict[str, Any], reasons: list[str]) -> set[st
                 for dependency in direct_dependencies
             ):
                 _reason(reasons, f"TASK_{task_id}_REPAIR_OWNER_DEPENDENCY_MISSING")
-        if isinstance(owner_role, str) and owner_role in IMPLEMENTATION_ROLES and task_id.startswith(("IMPLEMENT-", "REPAIR-")):
+        if task_id == "VALIDATE-001" and not any(
+            dependency.startswith(("IMPLEMENT-", "REPAIR-"))
+            for dependency in dependencies.get(task_id, [])
+        ):
+            _reason(reasons, "TASK_VALIDATE-001_IMPLEMENTATION_DEPENDENCY_MISSING")
+        if task_id == "VALIDATE-001":
+            for worker_task_id in worker_scopes:
+                if not depends_on(task_id, worker_task_id):
+                    _reason(reasons, f"TASK_VALIDATE-001_DEPENDENCY_{worker_task_id}_MISSING")
+        if task_id == "ACCEPT-001" and not depends_on(task_id, "VALIDATE-001"):
+            _reason(reasons, "TASK_ACCEPT-001_VALIDATION_DEPENDENCY_MISSING")
+        if isinstance(owner_role, str) and owner_role in IMPLEMENTATION_OWNER_ROLES and task_id.startswith(("IMPLEMENT-", "REPAIR-")):
             scope = _object(task.get("scope"))
             if scope is not None and isinstance(scope.get("include"), list) and not scope["include"]:
                 _reason(reasons, f"TASK_{task_id}_SCOPE_EMPTY")
@@ -361,7 +454,11 @@ def _validate_task_records(record: dict[str, Any], reasons: list[str]) -> set[st
     return task_ids
 
 
-def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None:
+def _validate_worker_results(
+    record: dict[str, Any],
+    worker_check_commands: dict[str, str],
+    reasons: list[str],
+) -> None:
     tasks = record.get("tasks")
     task_records = {
         task.get("task_id"): task
@@ -379,14 +476,17 @@ def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None
         return
 
     changed_files = record.get("changed_files")
-    if not isinstance(changed_files, list) or not changed_files:
+    reverted_files = record.get("reverted_files")
+    has_reversion_evidence = isinstance(reverted_files, list) and bool(reverted_files)
+    if not isinstance(changed_files, list) or (not changed_files and not has_reversion_evidence):
         _reason(reasons, "CHANGED_FILES_MISSING")
         changed_files = []
-    valid_changed_files = {
-        path for path in changed_files if _valid_relative_path(path)
-    }
-    if len(valid_changed_files) != len(changed_files):
+    valid_changed_paths = [path for path in changed_files if _valid_relative_path(path)]
+    valid_changed_files = set(valid_changed_paths)
+    if len(valid_changed_paths) != len(changed_files):
         _reason(reasons, "CHANGED_FILES_INVALID")
+    if len(valid_changed_files) != len(valid_changed_paths):
+        _reason(reasons, "CHANGED_FILES_DUPLICATE")
 
     results_by_attempt: dict[tuple[str, int], dict[str, Any]] = {}
     for index, result in enumerate(results, start=1):
@@ -441,14 +541,29 @@ def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None
         if not isinstance(result_files, list) or any(not _valid_relative_path(path) for path in result_files):
             _reason(reasons, f"WORKER_RESULT_{index}_CHANGED_FILES_INVALID")
             result_files = []
+        final_files = result_record.get("final_changed_files", result_files)
+        if not isinstance(final_files, list) or any(not _valid_relative_path(path) for path in final_files):
+            _reason(reasons, f"WORKER_RESULT_{index}_FINAL_CHANGED_FILES_INVALID")
+            final_files = []
         task_evidence = _object(task.get("evidence"))
         task_evidence_files = task_evidence.get("changed_files") if task_evidence is not None else None
-        if not isinstance(task_evidence_files, list) or any(not _valid_relative_path(path) for path in task_evidence_files):
-            _reason(reasons, f"WORKER_RESULT_{index}_EVIDENCE_FILES_INVALID")
-        elif set(result_files) != set(task_evidence_files):
-            _reason(reasons, f"WORKER_RESULT_{index}_EVIDENCE_FILES_MISMATCH")
-        if is_active_attempt and not set(result_files).issubset(valid_changed_files):
-            _reason(reasons, f"WORKER_RESULT_{index}_FILES_NOT_IN_DIFF")
+        if is_active_attempt:
+            if not isinstance(task_evidence_files, list) or any(not _valid_relative_path(path) for path in task_evidence_files):
+                _reason(reasons, f"WORKER_RESULT_{index}_EVIDENCE_FILES_INVALID")
+            elif set(result_files) != set(task_evidence_files):
+                _reason(reasons, f"WORKER_RESULT_{index}_EVIDENCE_FILES_MISMATCH")
+            if not set(result_files).issubset(valid_changed_files):
+                _reason(reasons, f"WORKER_RESULT_{index}_FILES_NOT_IN_DIFF")
+            if len(result_files) != len(set(result_files)):
+                _reason(reasons, f"WORKER_RESULT_{index}_CHANGED_FILES_DUPLICATE")
+            if any(not _scope_owns_path(task.get("scope"), path) for path in result_files):
+                _reason(reasons, f"WORKER_RESULT_{index}_FILE_OUTSIDE_SCOPE")
+            if len(final_files) != len(set(final_files)):
+                _reason(reasons, f"WORKER_RESULT_{index}_FINAL_CHANGED_FILES_DUPLICATE")
+            if not set(final_files).issubset(set(result_files)):
+                _reason(reasons, f"WORKER_RESULT_{index}_FINAL_FILES_NOT_IN_TOUCHED_FILES")
+            if any(not _scope_owns_path(task.get("scope"), path) for path in final_files):
+                _reason(reasons, f"WORKER_RESULT_{index}_FINAL_FILE_OUTSIDE_SCOPE")
 
         route = _object(result_record.get("route"))
         owner = _object(task.get("owner"))
@@ -460,6 +575,8 @@ def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None
                     _reason(reasons, f"WORKER_RESULT_{index}_ROUTE_{field.upper()}_MISSING")
             if route.get("role") != owner.get("role") or route.get("model") != owner.get("model") or route.get("reasoning") != owner.get("reasoning"):
                 _reason(reasons, f"WORKER_RESULT_{index}_ROUTE_MISMATCH")
+            if owner.get("role") == "primary-coordinator" and route.get("execution_mode") != "coordinator-fallback":
+                _reason(reasons, f"WORKER_RESULT_{index}_COORDINATOR_FALLBACK_MISSING")
             route_records = record.get("route_records")
             matching_route = any(
                 isinstance(route_record, dict)
@@ -484,22 +601,14 @@ def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None
         elif is_active_attempt and isinstance(result_checks, list):
             for check_index, check in enumerate(result_checks, start=1):
                 check_record = _object(check)
-                if check_record is None or not _non_empty_string(check_record.get("check_id")) or check_record.get("status") != "passed" or check_record.get("exit_status") != 0 or not _non_empty_string(check_record.get("command")):
+                check_exit_status = check_record.get("exit_status") if check_record is not None else None
+                strict_integer_exit = isinstance(check_exit_status, int) and not isinstance(check_exit_status, bool)
+                if check_record is None or not _non_empty_string(check_record.get("check_id")) or check_record.get("status") != "passed" or not strict_integer_exit or check_exit_status != 0 or not _non_empty_string(check_record.get("command")):
                     _reason(reasons, f"WORKER_RESULT_{index}_CHECK_{check_index}_INVALID")
                     continue
-                top_level_check = next(
-                    (
-                        top_level
-                        for top_level in record.get("checks", [])
-                        if isinstance(top_level, dict) and top_level.get("check_id") == check_record.get("check_id")
-                    ),
-                    None,
-                )
-                if top_level_check is None or any(
-                    top_level_check.get(field) != check_record.get(field)
-                    for field in ("command", "status", "exit_status")
-                ):
-                    _reason(reasons, f"WORKER_RESULT_{index}_CHECK_{check_index}_MISMATCH")
+                check_id = check_record.get("check_id")
+                if worker_check_commands.get(check_id) != check_record.get("command"):
+                    _reason(reasons, f"WORKER_RESULT_{index}_CHECK_{check_index}_PLAN_COMMAND_INVALID")
 
     for task_id, task in worker_tasks.items():
         active_attempt = task.get("attempt")
@@ -507,21 +616,130 @@ def _validate_worker_results(record: dict[str, Any], reasons: list[str]) -> None
         if active_result is None or active_result.get("status") != "completed":
             _reason(reasons, f"WORKER_RESULT_{task_id}_MISSING")
 
+    active_result_files: set[str] = set()
+    active_touched_files: dict[str, tuple[str, int, datetime | None]] = {}
+    active_result_final_files: set[str] = set()
+    for task_id, task in worker_tasks.items():
+        active_attempt = task.get("attempt")
+        active_result = results_by_attempt.get((task_id, active_attempt)) if isinstance(active_attempt, int) and not isinstance(active_attempt, bool) else None
+        if active_result is None:
+            continue
+        result_files = active_result.get("changed_files")
+        if isinstance(result_files, list):
+            active_touched_files.update(
+                {
+                    path: (
+                        task_id,
+                        active_attempt,
+                        _timestamp(active_result.get("observed_at")),
+                    )
+                    for path in result_files
+                    if isinstance(path, str) and isinstance(active_attempt, int) and not isinstance(active_attempt, bool)
+                }
+            )
+        if isinstance(result_files, list) and any(not _scope_owns_path(task.get("scope"), path) for path in result_files if isinstance(path, str)):
+            _reason(reasons, f"WORKER_RESULT_{task_id}_FILE_OUTSIDE_SCOPE")
+        final_files = active_result.get("final_changed_files", result_files)
+        if isinstance(final_files, list):
+            active_result_files.update(path for path in final_files if isinstance(path, str))
+            active_result_final_files.update(path for path in final_files if isinstance(path, str))
+
+    reversion_records: list[dict[str, Any]] = []
+    if reverted_files is not None:
+        if not isinstance(reverted_files, list):
+            _reason(reasons, "REVERTED_FILES_INVALID")
+        else:
+            for index, reversion in enumerate(reverted_files, start=1):
+                reversion_record = _object(reversion)
+                if reversion_record is None:
+                    _reason(reasons, f"REVERTED_FILE_{index}_INVALID")
+                    continue
+                reversion_records.append(reversion_record)
+                if (
+                    not _valid_relative_path(reversion_record.get("path"))
+                    or not _non_empty_string(reversion_record.get("task_id"))
+                    or not _positive_integer(reversion_record.get("attempt"))
+                    or reversion_record.get("status") != "reverted"
+                    or reversion_record.get("reviewed_by") != "acceptance-reviewer"
+                    or not _non_empty_string(reversion_record.get("review_id"))
+                    or _timestamp(reversion_record.get("reviewed_at")) is None
+                ):
+                    _reason(reasons, f"REVERTED_FILE_{index}_EVIDENCE_INVALID")
+                    continue
+                path = reversion_record["path"]
+                touched = active_touched_files.get(path)
+                if touched is None:
+                    _reason(reasons, f"REVERTED_FILE_{index}_NOT_TOUCHED")
+                    continue
+                if not touched[0].startswith("REPAIR-"):
+                    _reason(reasons, f"REVERTED_FILE_{index}_REPAIR_REQUIRED")
+                if (reversion_record["task_id"], reversion_record["attempt"]) != touched[:2]:
+                    _reason(reasons, f"REVERTED_FILE_{index}_TASK_MISMATCH")
+                if path in active_result_final_files:
+                    _reason(reasons, f"REVERTED_FILE_{index}_FINAL_FILE_CONTRADICTION")
+                review = _object(record.get("review"))
+                if reversion_record.get("review_id") != (review.get("review_id") if review is not None else None):
+                    _reason(reasons, f"REVERTED_FILE_{index}_REVIEW_MISMATCH")
+                reviewed_at = _timestamp(reversion_record.get("reviewed_at"))
+                review_at = _timestamp(review.get("observed_at")) if review is not None else None
+                if review_at is not None and reviewed_at is not None and reviewed_at > review_at:
+                    _reason(reasons, f"REVERTED_FILE_{index}_REVIEW_TIMESTAMP_INVALID")
+                if touched[2] is not None and reviewed_at is not None and reviewed_at < touched[2]:
+                    _reason(reasons, f"REVERTED_FILE_{index}_REVIEW_TIMESTAMP_INVALID")
+
+    reviewed_reverted_paths = {
+        reversion["path"]
+        for reversion in reversion_records
+        if isinstance(reversion.get("path"), str)
+        and reversion.get("status") == "reverted"
+        and reversion.get("reviewed_by") == "acceptance-reviewer"
+    }
+    for path in set(active_touched_files) - active_result_final_files:
+        if path not in reviewed_reverted_paths:
+            _reason(reasons, "CHANGED_FILE_REVERSION_EVIDENCE_MISSING")
+
+    if valid_changed_files != active_result_files:
+        _reason(reasons, "CHANGED_FILES_RESULT_MISMATCH")
     for path in valid_changed_files:
-        owned = False
-        for task in worker_tasks.values():
-            scope = _object(task.get("scope"))
-            includes = scope.get("include") if scope is not None else None
-            excludes = scope.get("exclude") if scope is not None else None
-            if isinstance(includes, list) and isinstance(excludes, list) and any(
-                isinstance(include, str) and _paths_overlap(path, include)
-                and not any(isinstance(exclude, str) and _paths_overlap(path, exclude) for exclude in excludes)
-                for include in includes
-            ):
-                owned = True
-                break
-        if not owned:
+        if not any(
+            isinstance(task.get("scope"), dict) and _scope_owns_path(task.get("scope"), path)
+            for task_id, task in worker_tasks.items()
+            if results_by_attempt.get((task_id, task.get("attempt"))) is not None
+        ):
             _reason(reasons, "CHANGED_FILE_OUTSIDE_OWNERSHIP")
+
+
+def _validate_check_freshness(record: dict[str, Any], checks: dict[str, dict[str, Any]], reasons: list[str]) -> None:
+    """Require final checks to observe the active implementation evidence."""
+
+    tasks = record.get("tasks")
+    task_records = {
+        task.get("task_id"): task
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+    } if isinstance(tasks, list) else {}
+    results = record.get("worker_results")
+    active_implementation_times: list[datetime] = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict) or not isinstance(result.get("task_id"), str):
+            continue
+        task_id = result["task_id"]
+        if not task_id.startswith("IMPLEMENT-"):
+            continue
+        task = task_records.get(task_id)
+        if not isinstance(task, dict) or result.get("attempt") != task.get("attempt"):
+            continue
+        observed_at = _timestamp(result.get("observed_at"))
+        if observed_at is not None and result.get("status") == "completed":
+            active_implementation_times.append(observed_at)
+
+    if not active_implementation_times:
+        return
+    latest_implementation = max(active_implementation_times)
+    for check_id, check in checks.items():
+        observed_at = _timestamp(check.get("observed_at"))
+        if observed_at is not None and observed_at < latest_implementation:
+            _reason(reasons, f"CHECK_{check_id}_STALE")
 
 
 def _validate_route_records(record: dict[str, Any], task_ids: set[str], reasons: list[str]) -> None:
@@ -579,16 +797,38 @@ def _validate_route_records(record: dict[str, Any], task_ids: set[str], reasons:
             _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
         if not isinstance(task_id, str) or task_id not in task_ids:
             _reason(reasons, f"ROUTE_{index}_TASK_MISSING")
+        task = task_records.get(task_id) if isinstance(task_id, str) else None
+        owner = task.get("owner") if isinstance(task, dict) else None
+        if isinstance(owner, dict) and (
+            owner.get("role") != role
+            or owner.get("model") != route_record.get("model")
+            or owner.get("reasoning") != route_record.get("reasoning")
+        ):
+            _reason(reasons, f"ROUTE_{index}_TASK_OWNER_MISMATCH")
 
         if role == "planner" and task_id != "PLAN-001":
             _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
         elif role == "primary-coordinator" and task_id != "VALIDATE-001":
-            _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
+            if not (
+                isinstance(task_id, str)
+                and task_id.startswith(("IMPLEMENT-", "REPAIR-"))
+                and route_record.get("execution_mode") == "coordinator-fallback"
+            ):
+                _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
+            else:
+                implementation_tasks.add(task_id)
+        if (
+            role == "primary-coordinator"
+            and isinstance(task_id, str)
+            and task_id.startswith(("IMPLEMENT-", "REPAIR-"))
+            and route_record.get("execution_mode") != "coordinator-fallback"
+        ):
+            _reason(reasons, f"ROUTE_{index}_COORDINATOR_FALLBACK_MISSING")
         elif role == "progress-orchestrator" and (not isinstance(task_id, str) or not task_id.startswith("PROGRESS-")):
             _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
         elif role == "acceptance-reviewer" and task_id != "ACCEPT-001":
             _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
-        elif role in {"implementation-worker", "implementation-worker-qwen"}:
+        elif role in IMPLEMENTATION_ROLES:
             if not isinstance(task_id, str) or task_id not in task_ids or not task_id.startswith(("IMPLEMENT-", "REPAIR-")):
                 _reason(reasons, f"ROUTE_{index}_TASK_ID_INVALID")
             else:
@@ -608,12 +848,27 @@ def _validate_route_records(record: dict[str, Any], task_ids: set[str], reasons:
     expected_implementation_tasks = {
         task_id
         for task_id, task in ((item.get("task_id"), item) for item in tasks if isinstance(item, dict))
-        if isinstance(task_id, str) and task_id.startswith(("IMPLEMENT-", "REPAIR-")) and isinstance(task.get("owner"), dict) and task["owner"].get("role") in {"implementation-worker", "implementation-worker-qwen"}
+        if isinstance(task_id, str) and task_id.startswith(("IMPLEMENT-", "REPAIR-")) and isinstance(task.get("owner"), dict) and task["owner"].get("role") in IMPLEMENTATION_OWNER_ROLES
     } if isinstance(tasks, list) else set()
     if expected_implementation_tasks - implementation_tasks:
         _reason(reasons, "IMPLEMENTATION_ROUTE_INCOMPLETE")
     if not implementation_tasks:
         _reason(reasons, "IMPLEMENTATION_ROUTE_MISSING")
+    observed_task_ids = {
+        route.get("task_id")
+        for route in routes
+        if isinstance(route, dict) and isinstance(route.get("task_id"), str)
+    }
+    expected_route_task_ids = {
+        task_id
+        for task_id, task in task_records.items()
+        if isinstance(task, dict)
+        and isinstance(task.get("owner"), dict)
+        and task["owner"].get("role") in ROUTE_EXPECTATIONS
+        and not (path == "light" and task["owner"].get("role") == "progress-orchestrator")
+    }
+    for task_id in sorted(expected_route_task_ids - observed_task_ids):
+        _reason(reasons, f"ROUTE_TASK_{task_id}_MISSING")
 
 
 def _validate_checkpoints(record: dict[str, Any], task_ids: set[str], reasons: list[str]) -> None:
@@ -634,6 +889,17 @@ def _validate_checkpoints(record: dict[str, Any], task_ids: set[str], reasons: l
         for route in routes if isinstance(route, dict)
         if isinstance(route, dict) and route.get("role") == "progress-orchestrator" and isinstance(route.get("task_id"), str)
     } if isinstance(routes, list) else set()
+    tasks = record.get("tasks")
+    task_records = {
+        task.get("task_id"): task
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+    } if isinstance(tasks, list) else {}
+    progress_task_ids = {
+        task_id for task_id in task_records if task_id.startswith("PROGRESS-")
+    }
+    if path == "light" and progress_task_ids:
+        _reason(reasons, "LIGHT_PROGRESS_TASK_UNSUPPORTED")
     if path == "light" and checkpoints and not progress_route_ids:
         _reason(reasons, "CHECKPOINT_PROGRESS_ROUTE_MISSING")
 
@@ -651,8 +917,10 @@ def _validate_checkpoints(record: dict[str, Any], task_ids: set[str], reasons: l
             _reason(reasons, f"CHECKPOINT_{index}_ID_INVALID")
         elif checkpoint_id in checkpoint_ids:
             _reason(reasons, f"CHECKPOINT_{index}_DUPLICATE")
-        elif progress_route_ids and checkpoint_id not in progress_route_ids:
+        elif checkpoint_id not in progress_route_ids:
             _reason(reasons, f"CHECKPOINT_{index}_ROUTE_MISSING")
+        if isinstance(checkpoint_id, str) and checkpoint_id not in task_ids:
+            _reason(reasons, f"CHECKPOINT_{index}_TASK_MISSING")
         if isinstance(checkpoint_id, str):
             checkpoint_ids.add(checkpoint_id)
         if checkpoint_record.get("plan_id") != record.get("plan_id"):
@@ -661,6 +929,19 @@ def _validate_checkpoints(record: dict[str, Any], task_ids: set[str], reasons: l
             _reason(reasons, f"CHECKPOINT_{index}_TRIGGER_INVALID")
         if not _positive_integer(checkpoint_record.get("worker_wave")):
             _reason(reasons, f"CHECKPOINT_{index}_WORKER_WAVE_INVALID")
+        if _timestamp(checkpoint_record.get("observed_at")) is None:
+            _reason(reasons, f"CHECKPOINT_{index}_TIMESTAMP_INVALID")
+        checkpoint_observed_at = _timestamp(checkpoint_record.get("observed_at"))
+        checkpoint_task = task_records.get(checkpoint_id) if isinstance(checkpoint_id, str) else None
+        checkpoint_task_started_at = _timestamp(
+            checkpoint_task.get("attempt_started_at") if isinstance(checkpoint_task, dict) else None
+        )
+        if (
+            checkpoint_observed_at is not None
+            and checkpoint_task_started_at is not None
+            and checkpoint_observed_at < checkpoint_task_started_at
+        ):
+            _reason(reasons, f"CHECKPOINT_{index}_BEFORE_TASK")
         reviewer = _object(checkpoint_record.get("reviewer"))
         if (
             reviewer is None
@@ -682,23 +963,59 @@ def _validate_checkpoints(record: dict[str, Any], task_ids: set[str], reasons: l
                 for task_id in evidence_task_ids
             ):
                 _reason(reasons, f"CHECKPOINT_{index}_EVIDENCE_TASK_ID_INVALID")
+            if isinstance(evidence_task_ids, list) and checkpoint_observed_at is not None:
+                for evidence_task_id in evidence_task_ids:
+                    evidence_task = task_records.get(evidence_task_id) if isinstance(evidence_task_id, str) else None
+                    evidence_task_started_at = _timestamp(
+                        evidence_task.get("attempt_started_at") if isinstance(evidence_task, dict) else None
+                    )
+                    if evidence_task_started_at is not None and checkpoint_observed_at < evidence_task_started_at:
+                        _reason(reasons, f"CHECKPOINT_{index}_BEFORE_TASK")
             evidence_files = evidence.get("files")
             if isinstance(evidence_files, list):
                 for file_path in evidence_files:
                     if not _valid_relative_path(file_path):
                         _reason(reasons, f"CHECKPOINT_{index}_EVIDENCE_FILE_INVALID")
+            evidence_findings = evidence.get("findings")
+            if isinstance(evidence_findings, list) and any(not _non_empty_string(finding) for finding in evidence_findings):
+                _reason(reasons, f"CHECKPOINT_{index}_EVIDENCE_FINDING_INVALID")
+            if checkpoint_record.get("decision") == "CONTINUE" and isinstance(evidence_findings, list) and evidence_findings:
+                _reason(reasons, f"CHECKPOINT_{index}_FINDINGS_UNRESOLVED")
         if checkpoint_record.get("decision") == "CONTINUE":
             continue
         if checkpoint_record.get("decision") == "REDIRECT":
             if not _non_empty_string(checkpoint_record.get("required_action")):
                 _reason(reasons, f"CHECKPOINT_{index}_REDIRECT_UNRESOLVED")
             resolution = _object(checkpoint_record.get("resolution"))
-            if resolution is None or resolution.get("status") != "resolved" or not _non_empty_string(resolution.get("summary")):
+            resolution_task_ids = resolution.get("task_ids") if resolution is not None else None
+            if (
+                resolution is None
+                or resolution.get("status") != "resolved"
+                or not _non_empty_string(resolution.get("summary"))
+                or not isinstance(resolution_task_ids, list)
+                or not resolution_task_ids
+                or any(task_id not in task_ids for task_id in resolution_task_ids if isinstance(task_id, str))
+                or any(not isinstance(task_id, str) for task_id in resolution_task_ids)
+                or _timestamp(resolution.get("observed_at")) is None
+                or (
+                    _timestamp(checkpoint_record.get("observed_at")) is not None
+                    and _timestamp(resolution.get("observed_at")) is not None
+                    and _timestamp(resolution.get("observed_at")) < _timestamp(checkpoint_record.get("observed_at"))
+                )
+            ):
                 _reason(reasons, f"CHECKPOINT_{index}_REDIRECT_UNRESOLVED")
             continue
         if checkpoint_record.get("decision") == "BLOCKED" and not _non_empty_string(checkpoint_record.get("required_action")):
             _reason(reasons, f"CHECKPOINT_{index}_REQUIRED_ACTION_MISSING")
         _reason(reasons, f"CHECKPOINT_{index}_NOT_CONTINUE")
+
+    for progress_route_id in progress_route_ids:
+        if progress_route_id not in checkpoint_ids:
+            _reason(reasons, f"CHECKPOINT_PROGRESS_RESULT_{progress_route_id}_MISSING")
+    if path == "full":
+        for progress_task_id in progress_task_ids:
+            if progress_task_id not in checkpoint_ids:
+                _reason(reasons, f"CHECKPOINT_PROGRESS_RESULT_{progress_task_id}_MISSING")
 
 
 def _validate_review(record: dict[str, Any], reasons: list[str]) -> None:
@@ -750,6 +1067,25 @@ def _validate_review(record: dict[str, Any], reasons: list[str]) -> None:
             check_observed_at = _timestamp(check.get("observed_at"))
             if check_observed_at is not None and review_observed_at < check_observed_at:
                 _reason(reasons, "REVIEW_BEFORE_CHECKS")
+                break
+    if review_observed_at is not None:
+        tasks = record.get("tasks")
+        task_records = {
+            task.get("task_id"): task
+            for task in tasks
+            if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+        } if isinstance(tasks, list) else {}
+        worker_results = record.get("worker_results")
+        for result in worker_results if isinstance(worker_results, list) else []:
+            if not isinstance(result, dict):
+                continue
+            task_id = result.get("task_id")
+            task = task_records.get(task_id) if isinstance(task_id, str) else None
+            if not isinstance(task, dict) or result.get("attempt") != task.get("attempt"):
+                continue
+            result_observed_at = _timestamp(result.get("observed_at"))
+            if result_observed_at is not None and review_observed_at < result_observed_at:
+                _reason(reasons, "REVIEW_BEFORE_WORKERS")
                 break
 
     findings = review.get("findings")
@@ -807,7 +1143,10 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
     }
     repair_task_ids: set[str] = set()
     accepted_repair_task_ids: set[str] = set()
+    repair_cycles: list[int] = []
     repair_starts: list[datetime] = []
+    repair_completions: list[datetime] = []
+    worker_results = record.get("worker_results")
     for index, repair in enumerate(records, start=1):
         repair_record = _object(repair)
         if repair_record is None:
@@ -822,8 +1161,10 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
             repair_task_ids.add(task_id)
         task = task_records.get(task_id) if isinstance(task_id, str) else None
         owner = task.get("owner") if isinstance(task, dict) else None
-        if not isinstance(owner, dict) or owner.get("role") not in {"implementation-worker", "implementation-worker-qwen"}:
+        if not isinstance(owner, dict) or owner.get("role") not in IMPLEMENTATION_OWNER_ROLES:
             _reason(reasons, f"REPAIR_{index}_OWNER_INVALID")
+        elif owner.get("role") == "primary-coordinator" and owner.get("execution_mode") != "coordinator-fallback":
+            _reason(reasons, f"REPAIR_{index}_COORDINATOR_FALLBACK_MISSING")
         if repair_record.get("status") != "accepted":
             _reason(reasons, f"REPAIR_{index}_NOT_ACCEPTED")
         elif isinstance(task_id, str) and task_id in task_ids:
@@ -831,6 +1172,8 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
         cycle = repair_record.get("cycle")
         if not _positive_integer(cycle) or cycle > 2 or (isinstance(cycles, int) and not isinstance(cycles, bool) and cycle > cycles):
             _reason(reasons, f"REPAIR_{index}_CYCLE_INVALID")
+        elif isinstance(cycle, int) and not isinstance(cycle, bool):
+            repair_cycles.append(cycle)
         _validate_scope(repair_record.get("scope"), reasons, index)
         acceptance_ids = repair_record.get("acceptance_ids")
         if not isinstance(acceptance_ids, list) or not acceptance_ids:
@@ -851,6 +1194,22 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
         failure_refs = repair_record.get("failure_refs")
         if not isinstance(failure_refs, list) or not failure_refs or any(not _non_empty_string(reference) for reference in failure_refs):
             _reason(reasons, f"REPAIR_{index}_FAILURE_REFS_MISSING")
+        else:
+            review = _object(record.get("review"))
+            findings = review.get("findings") if review is not None else []
+            finding_ids = {
+                finding.get("finding_id")
+                for finding in findings
+                if isinstance(finding, dict) and isinstance(finding.get("finding_id"), str)
+            } if isinstance(findings, list) else set()
+            known_failure_refs = set(checks) | finding_ids
+            if any(reference not in known_failure_refs for reference in failure_refs):
+                _reason(reasons, f"REPAIR_{index}_FAILURE_REF_UNKNOWN")
+            affected_checks = {
+                reference for reference in failure_refs if reference in REQUIRED_CHECK_IDS
+            }
+            if not affected_checks.issubset(set(rerun_check_ids or [])):
+                _reason(reasons, f"REPAIR_{index}_AFFECTED_CHECK_NOT_RERUN")
 
         repair_scope = _object(repair_record.get("scope"))
         direct_dependencies = dependencies.get(task_id, []) if isinstance(task_id, str) else []
@@ -871,12 +1230,51 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
             or repair_scope.get("exclude") != owner_scope.get("exclude")
         ):
             _reason(reasons, f"REPAIR_{index}_SCOPE_MISMATCH")
+        task_scope = _object(task.get("scope")) if isinstance(task, dict) else None
+        if (
+            task_scope is None
+            or owner_scope is None
+            or task_scope.get("include") != owner_scope.get("include")
+            or task_scope.get("exclude") != owner_scope.get("exclude")
+        ):
+            _reason(reasons, f"REPAIR_{index}_TASK_SCOPE_MISMATCH")
+        task_acceptance_ids = task.get("acceptance_ids") if isinstance(task, dict) else None
+        if (
+            not isinstance(acceptance_ids, list)
+            or not isinstance(task_acceptance_ids, list)
+            or not set(acceptance_ids).issubset(set(task_acceptance_ids))
+        ):
+            _reason(reasons, f"REPAIR_{index}_ACCEPTANCE_IDS_MISMATCH")
+        owner_acceptance_ids = owner_task.get("acceptance_ids") if isinstance(owner_task, dict) else None
+        if (
+            not isinstance(task_acceptance_ids, list)
+            or not isinstance(owner_acceptance_ids, list)
+            or not set(task_acceptance_ids).issubset(set(owner_acceptance_ids))
+        ):
+            _reason(reasons, f"REPAIR_{index}_TASK_ACCEPTANCE_IDS_MISMATCH")
 
         attempt_started_at = _timestamp(task.get("attempt_started_at") if isinstance(task, dict) else None)
         if attempt_started_at is None:
             _reason(reasons, f"REPAIR_{index}_TIMESTAMP_INVALID")
         else:
             repair_starts.append(attempt_started_at)
+            active_result = next(
+                (
+                    result
+                    for result in worker_results
+                    if isinstance(result, dict)
+                    and result.get("task_id") == task_id
+                    and isinstance(task, dict)
+                    and result.get("attempt") == task.get("attempt")
+                    and result.get("status") == "completed"
+                ),
+                None,
+            ) if isinstance(worker_results, list) else None
+            completion_at = _timestamp(active_result.get("observed_at")) if isinstance(active_result, dict) else None
+            if completion_at is None:
+                _reason(reasons, f"REPAIR_{index}_RESULT_TIMESTAMP_INVALID")
+            else:
+                repair_completions.append(completion_at)
             if isinstance(rerun_check_ids, list) and all(
                 isinstance(check_id, str) and check_id in checks for check_id in rerun_check_ids
             ):
@@ -884,7 +1282,7 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
                     observed_at = _timestamp(checks[check_id].get("observed_at"))
                     if observed_at is None:
                         _reason(reasons, f"REPAIR_{index}_CHECK_TIMESTAMP_INVALID")
-                    elif observed_at < attempt_started_at:
+                    elif observed_at < (completion_at or attempt_started_at):
                         _reason(reasons, f"REPAIR_{index}_CHECK_EVIDENCE_STALE")
 
     missing_records = repair_task_ids_in_tasks - repair_task_ids
@@ -894,13 +1292,21 @@ def _validate_repairs(record: dict[str, Any], task_ids: set[str], checks: dict[s
     if missing_accepted_records and not missing_records:
         _reason(reasons, "REPAIR_TASK_RECORD_NOT_ACCEPTED")
 
-    if repair_starts:
+    if repair_completions:
         review = _object(record.get("review"))
         review_observed_at = _timestamp(review.get("observed_at") if review is not None else None)
         if review_observed_at is None:
             _reason(reasons, "REPAIR_REVIEW_TIMESTAMP_INVALID")
-        elif review_observed_at < max(repair_starts):
+        elif review_observed_at < max(repair_completions):
             _reason(reasons, "REPAIR_REVIEW_EVIDENCE_STALE")
+
+    if repair_cycles and (
+        not isinstance(cycles, int)
+        or isinstance(cycles, bool)
+        or max(repair_cycles) != cycles
+        or set(repair_cycles) != set(range(1, cycles + 1))
+    ):
+        _reason(reasons, "REPAIR_CYCLES_MISMATCH")
 
 
 def _validate_drift(record: dict[str, Any], live_rollout: bool, reasons: list[str]) -> None:
@@ -919,7 +1325,7 @@ def _validate_drift(record: dict[str, Any], live_rollout: bool, reasons: list[st
         valid_required_files = isinstance(required_files, list) and all(
             isinstance(path, str) and _valid_relative_path(path) for path in required_files
         )
-        if not valid_required_files or set(required_files) != DRIFT_REQUIRED_FILES:
+        if not valid_required_files or set(required_files) != DRIFT_SOURCE_REQUIRED_FILES:
             _reason(reasons, "DRIFT_REQUIRED_FILES_INVALID")
 
         def file_map(files: object, prefix: str, use_source_path: bool = False) -> dict[str, str]:
@@ -931,7 +1337,13 @@ def _validate_drift(record: dict[str, Any], live_rollout: bool, reasons: list[st
                     _reason(reasons, f"DRIFT_{prefix}_{index}_INVALID")
                     continue
                 path = file_record.get("source_path") if use_source_path else file_record.get("path")
-                if not _valid_relative_path(path) or not isinstance(file_record.get("sha256"), str) or not SHA256_PATTERN.fullmatch(file_record["sha256"]):
+                status = file_record.get("status")
+                has_hash = "sha256" in file_record
+                if status is not None and status not in {"present", "missing", "invalid"}:
+                    _reason(reasons, f"DRIFT_{prefix}_{index}_STATUS_INVALID")
+                if status in {"missing", "invalid"} and has_hash:
+                    _reason(reasons, f"DRIFT_{prefix}_{index}_STATUS_HASH_CONTRADICTION")
+                if status in {"missing", "invalid"} or not _valid_relative_path(path) or not isinstance(file_record.get("sha256"), str) or not SHA256_PATTERN.fullmatch(file_record["sha256"]):
                     _reason(reasons, f"DRIFT_{prefix}_{index}_INVALID")
                     continue
                 if path in result:
@@ -940,7 +1352,7 @@ def _validate_drift(record: dict[str, Any], live_rollout: bool, reasons: list[st
             return result
 
         source_map = file_map(drift.get("source_files"), "SOURCE")
-        if set(source_map) != DRIFT_REQUIRED_FILES:
+        if set(source_map) != DRIFT_SOURCE_REQUIRED_FILES:
             _reason(reasons, "DRIFT_SOURCE_FILE_SET_INVALID")
 
         targets = drift.get("targets")
@@ -959,9 +1371,25 @@ def _validate_drift(record: dict[str, Any], live_rollout: bool, reasons: list[st
                 continue
             target_statuses.append(target_status)
             target_map = file_map(target.get("files"), target_name.upper(), use_source_path=True)
-            if set(target_map) != DRIFT_REQUIRED_FILES:
+            if set(target_map) != DRIFT_TARGET_REQUIRED_FILES[target_name]:
                 _reason(reasons, f"DRIFT_{target_name.upper()}_FILE_SET_INVALID")
-            hashes_match = target_map == source_map and bool(source_map)
+            extra_files = target.get("extra_files")
+            valid_extra_files = isinstance(extra_files, list) and all(
+                _valid_relative_path(path) for path in extra_files
+            )
+            if not valid_extra_files:
+                _reason(reasons, f"DRIFT_{target_name.upper()}_EXTRA_FILES_INVALID")
+                extra_files = []
+            elif len(extra_files) != len(set(extra_files)):
+                _reason(reasons, f"DRIFT_{target_name.upper()}_EXTRA_FILES_DUPLICATE")
+            elif any(path in DRIFT_TARGET_REQUIRED_FILES[target_name] for path in extra_files):
+                _reason(reasons, f"DRIFT_{target_name.upper()}_EXTRA_FILE_REQUIRED")
+            expected_source_map = {
+                path: digest
+                for path, digest in source_map.items()
+                if path in DRIFT_TARGET_REQUIRED_FILES[target_name]
+            }
+            hashes_match = target_map == expected_source_map and not extra_files and bool(expected_source_map)
             if target_status == "matched" and not hashes_match:
                 _reason(reasons, f"DRIFT_{target_name.upper()}_MATCH_CONTRADICTION")
             if target_status == "mismatch" and hashes_match:
@@ -1006,11 +1434,24 @@ def _validate_artifact(artifact: object, live_rollout: bool) -> list[str]:
     checks = record.get("checks")
     check_ids: set[str] = set()
     check_records: dict[str, dict[str, Any]] = {}
+    plan_check_commands = _plan_check_commands(record, "checks")
+    worker_check_commands = _plan_check_commands(record, "worker_checks")
+    if "focused-tests" not in plan_check_commands:
+        _reason(reasons, "PLAN_FOCUSED_CHECK_MISSING")
+    if not worker_check_commands:
+        _reason(reasons, "PLAN_WORKER_CHECKS_MISSING")
     if not isinstance(checks, list) or not checks:
         _reason(reasons, "CHECKS_MISSING")
     else:
         for index, check in enumerate(checks, start=1):
-            check_id = _validate_check(check, reasons, index)
+            check_id = _validate_check(
+                check,
+                reasons,
+                index,
+                record.get("evidence_revision"),
+                record.get("source_fingerprint"),
+                plan_check_commands,
+            )
             if check_id is not None:
                 if check_id in check_ids:
                     _reason(reasons, f"CHECK_{index}_DUPLICATE")
@@ -1021,7 +1462,8 @@ def _validate_artifact(artifact: object, live_rollout: bool) -> list[str]:
             _reason(reasons, f"CHECK_REQUIRED_{check_id}_MISSING")
 
     task_ids = _validate_task_records(record, reasons)
-    _validate_worker_results(record, reasons)
+    _validate_worker_results(record, worker_check_commands, reasons)
+    _validate_check_freshness(record, check_records, reasons)
     _validate_route_records(record, task_ids, reasons)
     _validate_checkpoints(record, task_ids, reasons)
     _validate_review(record, reasons)
@@ -1036,14 +1478,39 @@ def _validate_artifact(artifact: object, live_rollout: bool) -> list[str]:
             _reason(reasons, "GIT_SCOPE_NOT_CLEAN")
         if not _non_empty_string(git.get("secret_scan")):
             _reason(reasons, "GIT_SECRET_SCAN_MISSING")
+        if git.get("branch") != f"symphony/issue-{record.get('issue_id')}":
+            _reason(reasons, "GIT_BRANCH_INVALID")
 
     published = record.get("published")
     if not isinstance(published, bool):
         _reason(reasons, "PUBLISHED_STATUS_INVALID")
     elif published:
         publication = _object(record.get("publication"))
-        if publication is None or not _non_empty_string(publication.get("branch")) or not _non_empty_string(publication.get("commit_sha")) or not _non_empty_string(publication.get("pr_url")) or not _non_empty_string(publication.get("published_at")):
+        if publication is None:
             _reason(reasons, "PUBLICATION_EVIDENCE_MISSING")
+        else:
+            branch = publication.get("branch")
+            if branch != f"symphony/issue-{record.get('issue_id')}":
+                _reason(reasons, "PUBLICATION_BRANCH_INVALID")
+            commit_sha = publication.get("commit_sha")
+            if not isinstance(commit_sha, str) or COMMIT_SHA_PATTERN.fullmatch(commit_sha) is None:
+                _reason(reasons, "PUBLICATION_COMMIT_INVALID")
+            pr_url = publication.get("pr_url")
+            if not isinstance(pr_url, str) or PR_URL_PATTERN.fullmatch(pr_url) is None:
+                _reason(reasons, "PUBLICATION_PR_URL_INVALID")
+            publication_at = _timestamp(publication.get("published_at"))
+            if publication_at is None:
+                _reason(reasons, "PUBLICATION_TIMESTAMP_INVALID")
+            else:
+                evidence_times = [
+                    _timestamp(check.get("observed_at"))
+                    for check in check_records.values()
+                ]
+                review = _object(record.get("review"))
+                evidence_times.append(_timestamp(review.get("observed_at")) if review is not None else None)
+                valid_evidence_times = [observed_at for observed_at in evidence_times if observed_at is not None]
+                if valid_evidence_times and publication_at < max(valid_evidence_times):
+                    _reason(reasons, "PUBLICATION_EVIDENCE_STALE")
 
     return reasons
 

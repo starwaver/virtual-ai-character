@@ -99,6 +99,8 @@ Use the host-side `github_api` tool for GitHub issue and pull request actions. U
 
 The Spark default uses Luna as the primary coordinator and implementation worker. It uses Astra for planning, progress review, and acceptance review. It uses the local Qwen profile only for a bounded implementation task. Do not route planning, progress review, acceptance review, or primary coordination to Qwen.
 
+If the implementation-worker role is unavailable, the Luna coordinator can run one bounded implementation task sequentially. Record `primary-coordinator` as the task owner and set `execution_mode` to `coordinator-fallback` in the task, route, and worker-result records. Do not claim that a worker ran when the coordinator performed the work.
+
 The issue slot remains one. Use up to three implementation workers only when their exact file ownership does not overlap. Do not force parallel work when tasks share dependencies or files.
 
 ## Execution paths
@@ -246,7 +248,7 @@ Use one plan artifact and one record for each task.
 
 The plan record uses the same schema. Set `task_id` to `PLAN-001`, set `dependencies` to an empty list, and set `stage` to `planning`. Add a `tasks` list that contains every implementation, progress, acceptance, and repair task. Each task in that list has its own exact `dependencies`, owner, route, route reason, worker wave, scope, acceptance IDs, and completion evidence.
 
-Each `evidence.checks` entry must contain `check_id`, `command`, `exit_status`, `status`, `observed_at`, and `result_summary`. Use `passed`, `failed`, `blocked`, or `unrun` for `status`. Use exit status `0` only for `passed`. Use a nonzero exit status for `failed`. Use `null` for `blocked` or `unrun`, and name the required external action for `blocked`.
+Each `evidence.checks` entry must contain `check_id`, `command`, `exit_status`, `status`, `observed_at`, `evidence_revision`, `source_fingerprint`, and `result_summary`. Use `passed`, `failed`, `blocked`, or `unrun` for `status`. Use exit status `0` only for `passed`. Use a nonzero exit status for `failed`. Use `null` for `blocked` or `unrun`, and name the required external action for `blocked`. Write every timestamp as an explicit UTC instant, such as `2026-09-22T15:00:00Z`. Bind every required check to the current `evidence_revision` and `source_fingerprint`.
 
 ### Checkpoint artifact: `symphony.checkpoint.v1`
 
@@ -267,13 +269,15 @@ Record one artifact for each progress review.
 }
 ```
 
-Use `CONTINUE` when scope, dependencies, and evidence match the plan. Use `REDIRECT` when the plan or ownership is wrong. Pause new work, update the plan, and assign the replacement task after `REDIRECT`. Use `BLOCKED` only when an external action is required. Name that action in `required_action`.
+Use `CONTINUE` when scope, dependencies, and evidence match the plan. Use `REDIRECT` when the plan or ownership is wrong. A resolved redirect names the corrective task IDs and a later UTC resolution time in `resolution`. Pause new work, update the plan, and assign the replacement task after `REDIRECT`. Use `BLOCKED` only when an external action is required. Name that action in `required_action`.
 
 The coordinator persists the checkpoint returned by the read-only reviewer. The reviewer does not edit the plan or task records.
 
 ### Publication artifact: `symphony.publication.v1`
 
 Create a draft handoff after the coordinator records the completed task, route, checkpoint, and check evidence, and before the independent acceptance review. The acceptance reviewer reads the draft. Finalize it only after the reviewer returns `ACCEPT`.
+
+Set `evidence_revision` to the reviewed source revision identifier. Compute `source_fingerprint` with `git diff --binary <source revision> -- <changed files> | sha256sum`. Record the command and its output reference with the checks. Recompute both values after any repair or commit-hook change.
 
 ```json
 {
@@ -465,6 +469,8 @@ Create a draft handoff after the coordinator records the completed task, route, 
       "status": "passed",
       "observed_at": "UTC timestamp",
       "output_ref": ".git/symphony/issue-3/checks/focused-tests.json",
+      "evidence_revision": "evidence-001",
+      "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_summary": "Focused tests passed."
     },
     {
@@ -475,6 +481,8 @@ Create a draft handoff after the coordinator records the completed task, route, 
       "status": "passed",
       "observed_at": "UTC timestamp",
       "output_ref": ".git/symphony/issue-3/checks/route-check.json",
+      "evidence_revision": "evidence-001",
+      "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_summary": "Required routes matched."
     },
     {
@@ -485,6 +493,8 @@ Create a draft handoff after the coordinator records the completed task, route, 
       "status": "passed",
       "observed_at": "UTC timestamp",
       "output_ref": ".git/symphony/issue-3/checks/git-diff-check.json",
+      "evidence_revision": "evidence-001",
+      "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_summary": "The diff has no whitespace errors."
     },
     {
@@ -495,6 +505,8 @@ Create a draft handoff after the coordinator records the completed task, route, 
       "status": "passed",
       "observed_at": "UTC timestamp",
       "output_ref": ".git/symphony/issue-3/checks/pnpm-typecheck.json",
+      "evidence_revision": "evidence-001",
+      "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_summary": "All type checks passed."
     },
     {
@@ -505,6 +517,8 @@ Create a draft handoff after the coordinator records the completed task, route, 
       "status": "passed",
       "observed_at": "UTC timestamp",
       "output_ref": ".git/symphony/issue-3/checks/pnpm-lint.json",
+      "evidence_revision": "evidence-001",
+      "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_summary": "Lint passed."
     }
   ],
@@ -543,11 +557,17 @@ Do not move `failed`, `blocked`, or `unrun` evidence to a passing state without 
 
 Each task has a positive `attempt` and `attempt_started_at`. A new attempt increments `attempt` and sets a new start time. A worker result is fresh only when its issue, plan, task, and attempt values match the active record, and its `observed_at` is not earlier than `attempt_started_at`. Reject a stale result and leave the task status unchanged. An accepted task keeps its accepted attempt during continuation. Do not reuse an attempt number.
 
+The coordinator must give every implementation and repair task exact file paths. A worker result must list only paths in that task's own `scope.include` list. An exclude path always takes priority. A directory name cannot claim a nested changed file. The final `changed_files` list must equal the union of the active completed worker results. Preserve older attempt inventories, but do not compare them with a newer attempt inventory.
+
+The validation task must depend on every implementation and repair task, directly or through accepted task dependencies. The acceptance task must depend on the validation task. Every mandatory task must have a matching route record. The final review time must follow every active worker result and every required check. Each required check must use the current evidence revision and source fingerprint. These ordering rules prevent a review from accepting stale evidence.
+
 ## Repair loop
 
-Allow at most two repair cycles for one plan. A failed check must name one repair task, its owner, its exact paths, its acceptance IDs, its failure references, and its route. A repair task inherits the scope of its direct implementation dependency. Rerun every affected check after the repair. Run the acceptance reviewer again after the rerun.
+Allow at most two repair cycles for one plan. A failed check must name one repair task, its owner, its exact paths, its acceptance IDs, its failure references, and its route. A repair task inherits the exact scope of its direct implementation or repair dependency. Its record must repeat that scope and use a subset of the dependency acceptance IDs. A coordinator fallback uses `primary-coordinator` and `execution_mode: coordinator-fallback` in the task, route, and worker result. Rerun every affected check after the repair. Run the acceptance reviewer again after the rerun.
 
 If the second repair cycle fails, mark the plan `blocked` or `failed` and stop publication. Do not start a third repair cycle. If an external action blocks a check, mark it `blocked`, name the action, and wait for a new attempt after that action. Never report missing test evidence as a pass.
+
+A checkpoint must have an explicit UTC timestamp. A `CONTINUE` checkpoint must have no unresolved findings. A resolved `REDIRECT` must name the corrective task IDs and a later resolution timestamp. A repair failure reference must name a recorded check or review finding. The repair scope must match the direct implementation or repair dependency exactly.
 
 ## Required checks and publication gate
 
@@ -566,12 +586,13 @@ The publication gate rejects the handoff if any condition is true:
 - A task has no exact owner, route, scope, or evidence.
 - The final diff contains an out-of-scope file, generated runtime evidence, or credential text.
 - The source-to-installed route drift is unknown for a live rollout.
+- A required check is older than the active implementation evidence, or a repair rerun is older than its repair attempt.
 
-For a matched or mismatched drift report, include the full non-secret inventory, the source hashes, and both `installed` and `codex_home` target records. A pull request can carry `unrun` drift with a required operator action. A live rollout cannot.
+For a matched or mismatched drift report, include the full non-secret source inventory, the source hashes, `extra_files`, and both `installed` and `codex_home` target records. A target is `matched` only when its required files have equal hashes and it has no extra files. The installed mirror includes `WORKFLOW.md`. The `$CODEX_HOME` target excludes `WORKFLOW.md` because Codex reads the workflow from its runtime path. A pull request can carry `unrun` drift with a required operator action. A live rollout cannot.
 
 The executable gate checks the publication artifact. It does not create task records or infer worker results. The coordinator must write those records from observed worker output and check commands.
 
-The coordinator must not infer success from HTTP status `200`, process startup, a healthy container, or a worker claim. The final pull request body must identify the actual planner, each worker route, Qwen use or non-use, progress decisions, acceptance verdict, checks, and the pull request link.
+The coordinator must not infer success from HTTP status `200`, process startup, a healthy container, or a worker claim. A published artifact must use branch `symphony/issue-<issue_id>`, a 40-character commit SHA, a GitHub pull request URL, and an explicit UTC publication timestamp. The final pull request body must identify the actual planner, each worker route, Qwen use or non-use, progress decisions, acceptance verdict, checks, and the pull request link.
 
 ## Configuration drift
 
