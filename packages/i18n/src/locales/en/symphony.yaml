@@ -1,0 +1,56 @@
+dashboard:
+  eyebrow: Symphony operations
+  title: Live task board
+  description: Read-only runtime view. The orchestrator remains the source of truth.
+actions:
+  refresh: Refresh
+  close: Close
+connection:
+  loading: Loading task state…
+  empty: No tasks are available.
+  updated: Updated at {time}
+  stale: Showing retained data
+  error: Runtime API error
+  unavailable: The runtime did not return a usable state.
+status:
+  todo: Todo
+  doing: Doing
+  qa: QA
+  blocked: Blocked
+  retrying: Retrying
+  done: Done
+  attention: Needs attention
+board:
+  emptyColumn: No tasks in this column.
+  openTask: Open task {identifier}
+card:
+  stale: Stale data
+  missing: Missing from the latest runtime snapshot
+  noAgent: No agent assigned
+  tokens: '{count} tokens'
+details:
+  timeline: Event timeline
+  noEvents: No public events are available.
+  unavailable: Unavailable
+  agent: Agent
+  currentTask: Current task
+  role: Role
+  model: Model route
+  started: Start time
+  lastUpdated: Last update
+  latestEvent: Latest event
+  branch: Branch
+  workspace: Workspace
+  pullRequest: Pull request
+  turns: Turns
+  retries: Retries
+  runtime: Runtime (ms)
+  tokens: Total tokens
+  error: Error state
+  reviewerDecision: Reviewer decision
+errors:
+  unavailable: The runtime is unavailable.
+  timeout: The runtime did not respond before the timeout.
+  unsupported: The runtime does not provide this endpoint.
+  invalid_url: The runtime URL is not valid.
+  invalid_state: The runtime returned an unsupported state shape.

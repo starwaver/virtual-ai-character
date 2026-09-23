@@ -1,0 +1,36 @@
+{
+  "name": "@proj-airi/symphony-dashboard",
+  "type": "module",
+  "private": true,
+  "description": "Read-only Kanban dashboard for Symphony runtime operations",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "tsx src/server/main.ts",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "catalog:",
+    "@proj-airi/i18n": "workspace:*",
+    "@proj-airi/ui": "workspace:*",
+    "hono": "catalog:",
+    "unstorage": "catalog:",
+    "vue": "catalog:",
+    "vue-i18n": "catalog:"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "catalog:",
+    "@types/node": "catalog:",
+    "@unocss/reset": "catalog:",
+    "@vitejs/plugin-vue": "catalog:",
+    "unocss": "catalog:",
+    "unplugin-yaml": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:vitest",
+    "vue-tsc": "catalog:"
+  }
+}
