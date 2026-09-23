@@ -1,0 +1,9 @@
+.env
+secrets/
+state/
+__pycache__/
+.pytest_cache/
+*.pyc
+.coverage
+coverage/
+htmlcov/

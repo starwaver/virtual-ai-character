@@ -1,0 +1,11 @@
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "xhigh"
+
+[model_providers.spark_qwen]
+name = "Spark Qwen"
+base_url = "http://qwen:8000/v1"
+wire_api = "responses"
+requires_openai_auth = false
