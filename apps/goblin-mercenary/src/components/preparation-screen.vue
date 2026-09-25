@@ -4,6 +4,8 @@ import type { CrewId, GameCommand, GameState } from '../game'
 import { Button } from '@proj-airi/ui'
 import { computed } from 'vue'
 
+import CharacterArt from './character-art.vue'
+import LocationArt from './location-art.vue'
 import ResourceBar from './resource-bar.vue'
 import RosterList from './roster-list.vue'
 
@@ -61,6 +63,22 @@ function toggleCrew(id: CrewId) {
           Select two healthy crew members. Your choice sets the tools you can use in battle.
         </p>
       </header>
+
+      <section v-if="contract" class="preparation-scene" aria-label="Selected crew">
+        <LocationArt :location="contract.id" />
+        <div class="marching-crew">
+          <div v-for="id in selectedCrew" :key="id" class="marching-member">
+            <CharacterArt :character="id" />
+            <span>{{ state.crew[id].name }}</span>
+          </div>
+          <div v-for="slot in 2 - selectedCrew.length" :key="`empty-${slot}`" class="empty-crew-slot" aria-hidden="true">
+            +
+          </div>
+        </div>
+        <p class="preparation-scene-label">
+          {{ selectedCrew.length }} / 2 selected · {{ contract.name }}
+        </p>
+      </section>
 
       <div :class="['preparation-grid', 'grid gap-6 xl:grid-cols-[1.4fr_0.8fr]']">
         <section :class="['section-card', 'rounded-3xl p-5 sm:p-7']" aria-labelledby="crew-choice-title">

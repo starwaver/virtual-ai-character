@@ -4,6 +4,8 @@ import type { CrewId, CrewRole, GameState } from '../game'
 import { Button } from '@proj-airi/ui'
 import { computed } from 'vue'
 
+import CharacterArt from './character-art.vue'
+
 import { CREW_IDS } from '../game'
 
 const props = withDefaults(defineProps<{
@@ -62,9 +64,9 @@ function isSelectionLimitReached(id: CrewId): boolean {
         ]"
       >
         <div :class="['flex items-start gap-3']">
-          <span :class="['crew-token', 'grid h-11 w-11 shrink-0 place-items-center rounded-full text-lg font-semibold']" aria-hidden="true">
-            {{ member.name.slice(0, 1) }}
-          </span>
+          <div class="roster-portrait">
+            <CharacterArt :character="member.id" :fallen="member.health === 0" />
+          </div>
           <div :class="['min-w-0 flex-1']">
             <div :class="['flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1']">
               <h3 :class="['font-semibold']">
