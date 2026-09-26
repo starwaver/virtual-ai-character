@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "DOM",
+      "ESNext",
+      "DOM.Iterable"
+    ],
+    "useDefineForClassFields": true,
+    "types": [
+      "vite/client",
+      "vitest"
+    ]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.vue",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "uno.config.ts"
+  ]
+}

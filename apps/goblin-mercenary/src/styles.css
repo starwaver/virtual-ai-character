@@ -1,0 +1,556 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color: #f0eadb;
+  background: #151a17;
+  font-weight: 400;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: #151a17;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: #151a17;
+  color: #f0eadb;
+}
+
+body,
+.game-shell {
+  min-height: 100vh;
+  min-height: 100svh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid #e6ba64;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  filter: saturate(0.55);
+  opacity: 0.7;
+}
+
+::selection {
+  color: #171b17;
+  background: #dcae55;
+}
+
+.game-header {
+  display: flex;
+  width: min(100%, 90rem);
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-inline: auto;
+  border-bottom: 1px solid rgb(226 203 148 / 12%);
+  padding: 0.9rem clamp(1rem, 4vw, 2rem);
+}
+
+.game-brand {
+  min-width: 0;
+}
+
+.game-eyebrow {
+  margin: 0;
+  color: #d5b66c;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.game-title {
+  margin: 0.2rem 0 0;
+  color: #f3ebd6;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.2rem, 3vw, 1.8rem);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.12;
+}
+
+.reset-button {
+  flex-shrink: 0;
+}
+
+.save-error {
+  width: min(calc(100% - 2rem), 90rem);
+  margin: 1rem auto 0;
+  border: 1px solid rgb(207 112 84 / 42%);
+  border-radius: 0.9rem;
+  background: rgb(127 55 40 / 20%);
+  color: #f0baa7;
+  padding: 0.8rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.game-page {
+  min-height: calc(100vh - 5.5rem);
+  min-height: calc(100svh - 5.5rem);
+  background:
+    radial-gradient(ellipse at 20% 0%, rgb(74 96 63 / 22%), transparent 42rem),
+    radial-gradient(ellipse at 100% 35%, rgb(123 79 40 / 14%), transparent 34rem),
+    #151a17;
+}
+
+.start-screen,
+.onboarding-screen {
+  min-height: calc(100vh - 5.5rem);
+  min-height: calc(100svh - 5.5rem);
+  background:
+    radial-gradient(ellipse at 15% 10%, rgb(82 112 68 / 26%), transparent 38rem),
+    radial-gradient(ellipse at 95% 85%, rgb(142 89 37 / 19%), transparent 36rem),
+    #151a17;
+}
+
+.start-card,
+.onboarding-card,
+.section-card,
+.progress-card,
+.resource-item,
+.resource-brand {
+  border: 1px solid rgb(226 203 148 / 14%);
+  background: rgb(35 42 36 / 94%);
+  box-shadow: 0 20px 55px rgb(0 0 0 / 20%);
+}
+
+.start-card,
+.onboarding-card {
+  border-color: rgb(226 203 148 / 22%);
+  background:
+    linear-gradient(135deg, rgb(40 48 40 / 98%), rgb(28 34 30 / 98%)),
+    #252c25;
+}
+
+.start-side {
+  background:
+    radial-gradient(circle at 50% 30%, rgb(205 156 66 / 14%), transparent 16rem),
+    #202720;
+}
+
+.eyebrow,
+.small-label {
+  color: #d5b66c;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.start-title {
+  color: #f3ebd6;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700;
+  letter-spacing: -0.055em;
+}
+
+.start-title-accent {
+  color: #d9b665;
+}
+
+.start-lede,
+.copy-muted,
+.text-muted {
+  color: #b6beb1;
+}
+
+.start-objective,
+.nix-note,
+.onboarding-footer {
+  border: 1px solid rgb(222 185 99 / 18%);
+  background: rgb(12 17 14 / 34%);
+}
+
+.brass-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #e4bd66;
+  box-shadow: 0 0 14px rgb(228 189 102 / 50%);
+}
+
+.company-mark {
+  border: 1px solid rgb(225 190 104 / 44%);
+  background: radial-gradient(circle at 45% 38%, #5c6644, #29342b 69%);
+  box-shadow: 0 0 0 12px rgb(217 182 101 / 6%), 0 22px 60px rgb(0 0 0 / 35%);
+}
+
+.company-mark-inner {
+  border: 1px dashed rgb(230 199 125 / 60%);
+}
+
+.company-mark-button {
+  border: 2px solid #e0ba66;
+  background: #bc8b35;
+  color: #271f12;
+  box-shadow: inset 0 0 0 5px rgb(39 31 18 / 12%), 0 4px 18px rgb(0 0 0 / 35%);
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700;
+}
+
+.nix-note {
+  border-left: 3px solid #c5a253;
+}
+
+.onboarding-step {
+  border: 1px solid rgb(226 203 148 / 12%);
+  background: rgb(16 21 17 / 40%);
+}
+
+.step-number {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid rgb(225 190 104 / 42%);
+  border-radius: 50%;
+  color: #e0bd70;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.game-layout {
+  width: min(100%, 90rem);
+}
+
+.page-heading h1,
+.battle-heading h1,
+.section-card h2,
+.results-hero h1,
+.onboarding-card h1 {
+  color: #f3eddf;
+  font-family: Georgia, "Times New Roman", serif;
+  letter-spacing: -0.035em;
+}
+
+.progress-card {
+  min-width: 13rem;
+}
+
+.progress-track,
+.enemy-health-track,
+.crew-health-track {
+  background: #141a16;
+}
+
+.progress-fill {
+  background: linear-gradient(90deg, #7f9c5c, #d3b361);
+}
+
+.contract-card,
+.roster-card,
+.combat-member,
+.special-action-card {
+  border: 1px solid rgb(226 203 148 / 12%);
+  background: rgb(17 23 19 / 48%);
+}
+
+.contract-card {
+  min-height: 100%;
+  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+}
+
+.contract-card:hover {
+  transform: translateY(-2px);
+  border-color: rgb(222 185 99 / 45%);
+  background: rgb(30 39 30 / 78%);
+}
+
+.contract-card-complete {
+  opacity: 0.64;
+}
+
+.contract-card-complete:hover {
+  transform: none;
+}
+
+.risk-badge,
+.completed-label,
+.contract-cost,
+.charge-badge,
+.selection-label {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.risk-low {
+  border: 1px solid rgb(136 184 112 / 36%);
+  background: rgb(83 128 62 / 21%);
+  color: #b9dc9e;
+}
+
+.risk-medium {
+  border: 1px solid rgb(219 174 83 / 36%);
+  background: rgb(152 106 36 / 20%);
+  color: #e8c876;
+}
+
+.risk-high {
+  border: 1px solid rgb(210 112 78 / 38%);
+  background: rgb(132 57 39 / 23%);
+  color: #e6a28b;
+}
+
+.completed-label {
+  background: rgb(94 134 72 / 24%);
+  color: #c0d7a1;
+}
+
+.contract-cost,
+.charge-badge {
+  background: rgb(255 255 255 / 6%);
+  color: #c2c8bb;
+}
+
+.enemy-note,
+.preparation-tip,
+.job-cost,
+.battle-tip,
+.injury-list,
+.terminal-card {
+  border: 1px solid rgb(226 203 148 / 10%);
+  background: rgb(8 13 10 / 35%);
+}
+
+.preparation-tip {
+  border-left: 2px solid rgb(210 178 98 / 68%);
+}
+
+.reward-chip {
+  border: 1px solid rgb(215 187 112 / 18%);
+  border-radius: 999px;
+  background: rgb(198 158 72 / 9%);
+  color: #e3cd93;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.roster-card {
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.roster-card-selected {
+  border-color: rgb(219 181 91 / 58%);
+  background: rgb(96 77 37 / 18%);
+}
+
+.roster-card-unavailable {
+  opacity: 0.58;
+}
+
+.crew-token {
+  border: 1px solid rgb(225 190 104 / 30%);
+  background: radial-gradient(circle at 35% 30%, #536047, #252e27);
+  color: #e5d09c;
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.crew-health-fill {
+  background: linear-gradient(90deg, #718d59, #bad078);
+  transition: width 180ms ease;
+}
+
+.health-value,
+.selection-count {
+  color: #d9c88f;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.selection-label {
+  background: rgb(198 158 72 / 12%);
+  color: #e2c56f;
+}
+
+.healer-advice {
+  border: 1px solid rgb(216 176 86 / 32%);
+  background: rgb(141 102 35 / 14%);
+  color: #f0ddb1;
+}
+
+.warning-note {
+  border: 1px solid rgb(207 112 84 / 35%);
+  background: rgb(127 55 40 / 14%);
+  color: #e9b09a;
+}
+
+.launch-card {
+  border: 1px solid rgb(222 185 99 / 20%);
+  background: linear-gradient(145deg, rgb(84 68 34 / 44%), rgb(39 43 33 / 95%));
+}
+
+.threat-card {
+  border: 1px solid rgb(208 113 78 / 33%);
+  background: rgb(98 47 35 / 19%);
+}
+
+.enemy-panel {
+  border: 1px solid rgb(207 132 84 / 20%);
+  background:
+    radial-gradient(ellipse at 50% 22%, rgb(160 73 45 / 19%), transparent 18rem),
+    rgb(35 33 29 / 94%);
+}
+
+.enemy-art {
+  border: 1px solid rgb(215 142 90 / 44%);
+  background: radial-gradient(circle at 40% 35%, #784b36, #2b2824 72%);
+  box-shadow: 0 0 0 10px rgb(190 103 63 / 6%), 0 18px 45px rgb(0 0 0 / 32%);
+}
+
+.enemy-art-core {
+  border: 1px dashed rgb(225 184 119 / 58%);
+  background: rgb(20 23 20 / 47%);
+  color: #e1b46f;
+}
+
+.enemy-health-fill {
+  background: linear-gradient(90deg, #a14633, #e19b57);
+}
+
+.combat-member {
+  border-color: rgb(226 203 148 / 15%);
+}
+
+.special-action-card {
+  background: rgb(35 42 36 / 94%);
+}
+
+.action-unavailable {
+  border: 1px solid rgb(226 203 148 / 9%);
+  background: rgb(8 13 10 / 24%);
+  color: #9da89a;
+}
+
+.results-hero {
+  border: 1px solid rgb(226 203 148 / 18%);
+  background: rgb(35 42 36 / 94%);
+}
+
+.results-hero-victory,
+.results-hero-won {
+  border-color: rgb(139 178 100 / 40%);
+  background:
+    radial-gradient(ellipse at 82% 0%, rgb(114 157 71 / 20%), transparent 26rem),
+    rgb(35 42 36 / 94%);
+}
+
+.results-hero-defeat {
+  border-color: rgb(198 111 82 / 34%);
+  background:
+    radial-gradient(ellipse at 82% 0%, rgb(148 67 47 / 17%), transparent 26rem),
+    rgb(35 42 36 / 94%);
+}
+
+.reward-summary-item {
+  display: flex;
+  min-height: 5rem;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid rgb(215 187 112 / 18%);
+  border-radius: 0.9rem;
+  background: rgb(198 158 72 / 8%);
+  padding: 0.85rem;
+}
+
+.reward-summary-item strong {
+  color: #e8d49f;
+  font-size: 1.2rem;
+}
+
+.reward-summary-item dd {
+  margin: 0;
+}
+
+.injury-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: #dbc8a9;
+  font-size: 0.85rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 640px) {
+  .game-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .game-page,
+  .start-screen,
+  .onboarding-screen {
+    min-height: calc(100vh - 7rem);
+    min-height: calc(100svh - 7rem);
+  }
+
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .small-label {
+    letter-spacing: 0.09em;
+  }
+
+  .resource-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .resource-brand {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
