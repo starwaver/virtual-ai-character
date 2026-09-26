@@ -4,7 +4,6 @@ import type { ContractRisk, GameCommand, GameState } from '../game'
 import { Button } from '@proj-airi/ui'
 import { computed } from 'vue'
 
-import LocationArt from './location-art.vue'
 import ResourceBar from './resource-bar.vue'
 import RosterList from './roster-list.vue'
 
@@ -86,7 +85,7 @@ const campaignProgress = computed(() => `${props.state.completedContracts.length
             </div>
             <span class="small-label">Earn gold, rations, and reputation</span>
           </div>
-          <div :class="['contract-grid', 'grid gap-4 md:grid-cols-3']">
+          <div :class="['contract-grid', 'grid gap-4 md:grid-cols-2 2xl:grid-cols-3']">
             <article
               v-for="contract in contracts"
               :key="contract.id"
@@ -96,9 +95,6 @@ const campaignProgress = computed(() => `${props.state.completedContracts.length
                 contract.completed && 'contract-card-complete',
               ]"
             >
-              <div class="contract-landscape">
-                <LocationArt :location="contract.id" />
-              </div>
               <div :class="['flex items-start justify-between gap-3']">
                 <span :class="['risk-badge', `risk-${contract.risk}`]">
                   {{ riskLabels[contract.risk] }}

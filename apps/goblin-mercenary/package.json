@@ -9,7 +9,6 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
     "typecheck": "vue-tsc --noEmit"
   },

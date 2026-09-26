@@ -4,7 +4,6 @@ import type { GameCommand, GameState } from '../game'
 import { Button } from '@proj-airi/ui'
 import { computed } from 'vue'
 
-import BattleScene from './battle-scene.vue'
 import ResourceBar from './resource-bar.vue'
 import RosterList from './roster-list.vue'
 
@@ -89,8 +88,6 @@ const resultStatus = computed(() => {
         </p>
       </section>
 
-      <BattleScene v-if="isVictory" :state="state" />
-
       <div :class="['results-grid', 'grid gap-6 xl:grid-cols-[1.1fr_0.9fr]']">
         <section :class="['section-card', 'rounded-3xl p-5 sm:p-7']" aria-labelledby="outcome-title">
           <p class="eyebrow">
@@ -103,7 +100,7 @@ const resultStatus = computed(() => {
             {{ outcomeGuidance }}
           </p>
 
-          <dl v-if="isVictory && result" :class="[result.rewardApplied && 'reward-claimed', 'reward-summary', 'mt-5 grid grid-cols-3 gap-3']" aria-label="Contract rewards">
+          <dl v-if="isVictory && result" :class="['reward-summary', 'mt-5 grid grid-cols-3 gap-3']" aria-label="Contract rewards">
             <div class="reward-summary-item">
               <dt class="small-label">
                 Gold

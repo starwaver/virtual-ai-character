@@ -16,14 +16,6 @@ The browser saves the current run in local storage. Reload the page to resume. S
 
 The game requires no account, credentials, network connection, or external service.
 
-## Visual presentation
-
-The contract board, preparation, battlefield, and results share local vector illustrations. Each existing crew member and enemy has a distinct outfit.
-
-The battlefield shows both active crew members, health bars, the next threat, and the last action. Fallen crew remain visible. Focus or hover over a heal button to highlight its target.
-
-Health feedback uses the actual state before and after an action. Animations do not delay commands or change saves. The interface respects reduced-motion settings.
-
 ## Run, build, test, and typecheck
 
 From the repository root, install workspace dependencies with `pnpm install`.
@@ -49,15 +41,6 @@ Run the app's tests:
 ```sh
 pnpm -F @proj-airi/goblin-mercenary test
 ```
-
-Run the browser tests after you install Playwright Chromium:
-
-```sh
-pnpm exec playwright install chromium
-pnpm -F @proj-airi/goblin-mercenary test:browser
-```
-
-These tests cover scene health, threat targets, focus, strikes, healing, bombs, fallen crew, and victory. They use the existing rules to compare complete outcomes.
 
 Run the app's typecheck:
 
